@@ -1,0 +1,16 @@
+{
+  "name": "goo-cloud",
+  "private": true,
+  "version": "0.1.0",
+  "description": "goo cloud: sync and sharing server for goo (Fastify/Prisma API + Svelte dashboard). Convenience scripts for the whole repo.",
+  "scripts": {
+    "setup": "npm --prefix server ci && npm --prefix dashboard ci && npm --prefix e2e ci && npm --prefix e2e exec -- playwright install chromium",
+    "typecheck": "npm --prefix server run typecheck && npm --prefix dashboard run typecheck && npm --prefix e2e run typecheck",
+    "test": "npm run test:server && npm run test:dashboard",
+    "test:server": "npm --prefix server test",
+    "test:dashboard": "npm --prefix dashboard test",
+    "build": "npm --prefix dashboard run build && npm --prefix server run build",
+    "e2e": "node e2e/run.mjs"
+  },
+  "license": "MIT"
+}

@@ -12,9 +12,10 @@ real-time collaborative editing, end-to-end encryption.
 | Piece | Where | What |
 | --- | --- | --- |
 | Server | `goo-cloud/server` | Fastify 5 + Prisma + PostgreSQL 16, TypeScript. Auth, workspaces, members, notes, sync API, admin API. Routes declared once with zod; `openapi.yaml` is generated from them. |
-| Dashboard | `goo-cloud/dashboard` | Svelte 5 SPA served by the server at `/`: sign-in, workspaces, members, invites, users and audit for admins, approving desktop sign-ins. |
-| Deploy | `goo-cloud/deploy`, `docker-compose.yml` | One image (`goo-cloud`), Postgres, Caddy for TLS. |
-| Desktop sync | `goo/crates/goo-sync` + `goo/src/features/cloud` | Rust sync engine and the Settings > Cloud UI in the goo app (phase 2). |
+| Dashboard | `goo-cloud/dashboard` | Svelte 5 SPA served by the server at `/`: sign-in, workspaces, read-only notes, members, pending invites, devices, approving desktop sign-ins; users, all workspaces and audit for admins. |
+| Deploy | `goo-cloud/deploy`, `docker-compose.yml`, `deploy-manual.md` | One image (`goo-cloud`: API + dashboard), Postgres, Caddy for TLS. Published multi-arch to GHCR (and Docker Hub when configured) on release tags. |
+| e2e | `goo-cloud/e2e` | Playwright against the real server, the built dashboard and a throwaway Postgres. |
+| Desktop sync | `goo/crates/goo-sync` + `goo/src/features/cloud` | Rust sync engine and the Settings > goo cloud tab in the goo app. |
 
 ## 2. Concepts
 
@@ -23,7 +24,10 @@ real-time collaborative editing, end-to-end encryption.
 - **Workspace**: a synced notes folder. Each device links it to a local folder (the folder name is local, never synced).
 - **Membership**: `owner` > `admin` > `editor` > `viewer`. Viewers pull only; editors push; admins manage members;
   owners also rename, transfer and delete.
-- **Invite**: an admin adds an existing user by email with a role; the user accepts on the dashboard.
+- **Adding members**: an owner or admin adds people by email with a role (never above their own). An existing account becomes
+  a member at once, with nothing to accept (accounts only exist when an admin created them, so the email is the proof). An
+  email without an account is kept as a pending **invite** (no token, no expiry, cancellable) that turns into a membership when
+  an account with that email is created or signs in.
 - **Device** (`SyncClient`): one row per user and installation (name, platform, app version, last seen).
 - **Note**: one Markdown file in a workspace:
 
@@ -121,9 +125,23 @@ settings, the MCP token, recent folders.
 
 ## 5. Dashboard
 
-Sign-in, change password; Workspaces (list, create, rename, delete), Members (roles, remove, invites), Devices
-(own devices, sign one out); for admins: Users (create with temporary password, disable, reset), all workspaces,
-audit log; the device sign-in approval page. A read-only note viewer is a candidate for v1.1.
+Hash-routed pages (`dashboard/README.md`, every endpoint in `dashboard/API-USAGE.md`):
+
+- **Sign-in**, the forced "choose a new password" screen for admin-issued passwords, **Account** (change password; **Devices**:
+  the user's goo installations from `GET /v1/me/devices`, each can be signed out).
+- **Desktop sign-in** (`#/device?code=...`): approves the code goo shows (`POST /v1/auth/device/approve`), never without a click.
+  The server's plain `/device` page (code + email + password) remains for browsers without a dashboard session.
+- **Workspaces**: list (platform admins see all), create (slug optional), delete. A workspace has the tabs **Overview** (details;
+  rename and description for the owner or platform admins with optimistic concurrency; transfer ownership; leave; delete),
+  **Notes** (read-only list with path, size and last change, path search; a note opens as rendered Markdown or plain text: the
+  renderer builds elements from a data tree and never injects HTML, only http(s)/mailto links are clickable, images are not
+  loaded), **Members** (add by email with a role, change roles, remove, pending invites with cancel) and **Audit log** (owners
+  and admins).
+- For platform admins: **Overview** (counters, database health, recent activity), **Users** (create with a generated temporary
+  password or a typed one, platform roles for the super admin, disable, force a password change, reset the password), the
+  platform **Audit log**.
+
+The UI mirrors the authorization matrix (hidden or disabled controls explain why); the server stays the authority.
 
 ## 6. Security
 

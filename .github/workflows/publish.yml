@@ -1,0 +1,98 @@
+name: Publish image
+
+# Builds the goo-cloud image (API + bundled dashboard) for linux/amd64 and linux/arm64 and pushes it.
+#   Tag push vX.Y.Z  -> :X.Y.Z, :X.Y, :latest
+#   Manual run       -> :edge and :sha-<short sha>
+#
+# Registries:
+#   GitHub Container Registry  ghcr.io/<owner>/goo-cloud   always; uses GITHUB_TOKEN, no setup needed. (The first push
+#                              creates a private package; make it public under the package's settings on GitHub.)
+#   Docker Hub                 docker.io/<namespace>/goo-cloud   only when these repository settings exist
+#                              (Settings > Secrets and variables > Actions):
+#                                secret   DOCKERHUB_USERNAME   account that pushes
+#                                secret   DOCKERHUB_TOKEN      access token with read/write access (not the password)
+#                                variable DOCKERHUB_NAMESPACE  user or organisation (optional, defaults to DOCKERHUB_USERNAME)
+#                              Without them the Docker Hub push is skipped with a notice; the GHCR push still happens.
+#
+# The Docker Hub overview is published separately by dockerhub-description.yml.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+concurrency:
+  group: publish-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - name: Choose registries
+        id: cfg
+        env:
+          DH_USER: ${{ secrets.DOCKERHUB_USERNAME }}
+          DH_TOKEN_SET: ${{ secrets.DOCKERHUB_TOKEN != '' }}
+          DH_NAMESPACE: ${{ vars.DOCKERHUB_NAMESPACE }}
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          owner=$(echo "$OWNER" | tr '[:upper:]' '[:lower:]')
+          images="ghcr.io/${owner}/goo-cloud"
+          if [ -n "$DH_USER" ] && [ "$DH_TOKEN_SET" = "true" ]; then
+            ns="${DH_NAMESPACE:-$DH_USER}"
+            images="${images}"$'\n'"docker.io/${ns}/goo-cloud"
+            echo "dockerhub=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::DOCKERHUB_USERNAME/DOCKERHUB_TOKEN are not set: publishing to GHCR only."
+            echo "dockerhub=false" >> "$GITHUB_OUTPUT"
+          fi
+          {
+            echo "images<<EOF"
+            echo "$images"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v7
+      # A current QEMU for the arm64 half of the build (the runner's default emulator is older).
+      - uses: docker/setup-qemu-action@v4
+        with:
+          image: tonistiigi/binfmt:latest
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - if: steps.cfg.outputs.dockerhub == 'true'
+        uses: docker/login-action@v4
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ steps.cfg.outputs.images }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+            type=raw,value=edge,enable=${{ github.event_name == 'workflow_dispatch' }}
+            type=sha,prefix=sha-,enable=${{ github.event_name == 'workflow_dispatch' }}
+          labels: |
+            org.opencontainers.image.title=goo-cloud
+            org.opencontainers.image.description=goo cloud: sync and sharing server for the goo Markdown editor (API + dashboard)
+            org.opencontainers.image.licenses=MIT
+      - uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: server/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=goo-cloud
+          cache-to: type=gha,mode=max,scope=goo-cloud

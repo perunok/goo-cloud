@@ -389,8 +389,8 @@ Generated from the registered routes (authoritative schemas: `openapi.yaml`). "a
   `POST /v1/workspaces/publish`, workspace `visibility` / `default_role_for_requests` / `host_mode`, legacy token invites.
 - Added: notes and the file-based sync protocol, device list and sign-out (token families), ownership transfer, leave, sign-in
   audit entries. Workspace admins may now change and remove editors and viewers (Slinger: owner only).
-- DESIGN.md describes invites the user accepts on the dashboard; like Slinger's latest behaviour, an existing account is added
-  directly and an email without an account waits as a pending invite (claimed when the account is created or signs in).
+- Like Slinger's latest behaviour (and DESIGN.md section 2), an existing account is added directly and an email without an
+  account waits as a pending invite (claimed when the account is created or signs in); there is nothing to accept.
 - Viewer pushes are answered per change with `reason: forbidden` (Slinger refused the whole request with 403), so clients branch
   only on `reason`.
 

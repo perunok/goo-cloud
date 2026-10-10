@@ -1,0 +1,43 @@
+name: Docker Hub description
+
+# Pushes the Docker Hub overview and short description of the goo-cloud image from deploy/dockerhub/goo-cloud.md.
+# Runs when that file changes on main, or manually. Uses the same repository settings as publish.yml (DOCKERHUB_USERNAME,
+# DOCKERHUB_TOKEN with read, write and delete scope, optional variable DOCKERHUB_NAMESPACE); skipped when they are not set.
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'deploy/dockerhub/**'
+      - '.github/workflows/dockerhub-description.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  describe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      DH_USER: ${{ secrets.DOCKERHUB_USERNAME }}
+      DH_TOKEN_SET: ${{ secrets.DOCKERHUB_TOKEN != '' }}
+    steps:
+      - name: Check configuration
+        id: cfg
+        run: |
+          if [ -n "$DH_USER" ] && [ "$DH_TOKEN_SET" = "true" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::DOCKERHUB_USERNAME/DOCKERHUB_TOKEN are not set: nothing to update on Docker Hub."
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+          fi
+      - if: steps.cfg.outputs.enabled == 'true'
+        uses: actions/checkout@v7
+      - if: steps.cfg.outputs.enabled == 'true'
+        uses: peter-evans/dockerhub-description@v5
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          repository: ${{ vars.DOCKERHUB_NAMESPACE || secrets.DOCKERHUB_USERNAME }}/goo-cloud
+          short-description: goo cloud - self-hosted sync and sharing for the goo Markdown editor (API + dashboard).
+          readme-filepath: deploy/dockerhub/goo-cloud.md

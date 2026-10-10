@@ -1,0 +1,13 @@
+# HTTPS with automatic certificates (Let's Encrypt). Enable with, in .env:
+#   GOO_CADDYFILE=./deploy/Caddyfile.https
+#   GOO_DOMAIN=cloud.example.com      (a DNS A/AAAA record must point at this host; ports 80 and 443 must be reachable)
+#   GOO_BASE_URL=https://cloud.example.com
+#   GOO_COOKIE_SECURE=true            (also makes the server send Strict-Transport-Security)
+# Routing is identical to deploy/Caddyfile: everything goes to the server. HTTP on :80 is redirected to HTTPS by Caddy.
+{$GOO_DOMAIN} {
+	encode zstd gzip
+
+	header -Server
+
+	reverse_proxy server:8080
+}

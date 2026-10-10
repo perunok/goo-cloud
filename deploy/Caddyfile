@@ -1,0 +1,17 @@
+# DEFAULT: plain HTTP on :80 (HTTPS is OFF). Fine for a LAN, behind another TLS terminator, or for local trials.
+# For real deployments use deploy/Caddyfile.https (automatic Let's Encrypt) and set GOO_COOKIE_SECURE=true.
+#
+# Everything goes to the server: the API (/v1 for the goo app, /api/v1 for the dashboard), /device (desktop sign-in page),
+# /healthz and the dashboard ("/"). The server sets its own security headers and body limits (26 MiB for sync pushes), so
+# this only adds compression.
+{
+	auto_https off
+}
+
+:80 {
+	encode zstd gzip
+
+	header -Server
+
+	reverse_proxy server:8080
+}

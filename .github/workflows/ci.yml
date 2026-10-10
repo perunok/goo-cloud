@@ -1,0 +1,179 @@
+name: CI
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  NODE_VERSION: 22
+
+jobs:
+  typecheck:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: |
+            server/package-lock.json
+            dashboard/package-lock.json
+            e2e/package-lock.json
+      - run: npm --prefix server ci
+      - run: npm --prefix dashboard ci
+      - run: npm --prefix e2e ci
+      - run: npx prisma generate
+        working-directory: server
+      - run: npm run typecheck
+
+  server-tests:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: goo_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      # Throwaway service container; test/globalSetup.ts runs `prisma migrate deploy` against it first.
+      TEST_DATABASE_URL: postgresql://postgres:test@127.0.0.1:5432/goo_test
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: server/package-lock.json
+      - run: npm ci
+        working-directory: server
+      - run: npx prisma generate
+        working-directory: server
+      # Includes the test that fails when openapi.yaml is stale.
+      - run: npm test
+        working-directory: server
+
+  dashboard-tests:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: dashboard/package-lock.json
+      - run: npm ci
+        working-directory: dashboard
+      - run: npm test
+        working-directory: dashboard
+      - run: npm run build
+        working-directory: dashboard
+
+  e2e:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: e2e
+          POSTGRES_DB: goo_e2e
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      # e2e/run.mjs uses this database instead of starting its own container.
+      E2E_DATABASE_URL: postgresql://postgres:e2e@127.0.0.1:5432/goo_e2e
+      CI: 'true'
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: |
+            server/package-lock.json
+            dashboard/package-lock.json
+            e2e/package-lock.json
+      - run: npm --prefix server ci
+      - run: npm --prefix dashboard ci
+      - run: npm --prefix e2e ci
+      # run.mjs starts the server from source; make sure the Prisma client exists.
+      - run: npx prisma generate
+        working-directory: server
+      - run: npx playwright install --with-deps chromium
+        working-directory: e2e
+      - run: npm run e2e
+      - name: Upload test results on failure
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: e2e-results
+          path: |
+            e2e/test-results/
+            e2e/playwright-report/
+          if-no-files-found: ignore
+          retention-days: 14
+
+  docker-build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: smoke
+          POSTGRES_DB: goo
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    steps:
+      - uses: actions/checkout@v7
+      # Same build context as docker-compose.yml (the image bundles the dashboard); built and smoke-tested, never pushed.
+      - name: Build image
+        run: docker build -t goo-cloud:ci -f server/Dockerfile .
+      - name: Smoke test (migrations, health, dashboard, sign-in)
+        run: |
+          docker run -d --name goo --network host \
+            -e NODE_ENV=production -e PORT=8080 \
+            -e DATABASE_URL=postgresql://postgres:smoke@127.0.0.1:5432/goo \
+            -e GOO_SIGNING_SECRET=ci-smoke-signing-secret-0123456789abcdef \
+            -e GOO_COOKIE_SECURE=false -e GOO_BASE_URL=http://127.0.0.1:8080 \
+            -e GOO_ADMIN_BOOTSTRAP='[{"email":"smoke@example.com","password":"ci-smoke-passphrase-1","display_name":"Smoke","platform_role":"super_admin"}]' \
+            goo-cloud:ci
+          for i in $(seq 1 60); do curl -fsS http://127.0.0.1:8080/healthz && break; sleep 2; done
+          curl -fsS http://127.0.0.1:8080/healthz
+          curl -fsS http://127.0.0.1:8080/ | grep -q '<title>goo cloud</title>'
+          curl -fsS http://127.0.0.1:8080/runtime-config.js | grep -q '__GOO_API_BASE_URL__'
+          curl -fsS -H 'content-type: application/json' \
+            -d '{"email":"smoke@example.com","password":"ci-smoke-passphrase-1"}' \
+            http://127.0.0.1:8080/api/v1/auth/browser/login | grep -q csrf_token
+      - name: Server log
+        if: always()
+        run: docker logs goo 2>&1 | tail -50 || true
