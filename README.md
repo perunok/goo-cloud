@@ -4,6 +4,47 @@ Sync and sharing for [goo](https://github.com/perunok/goo), the local-first Mark
 in sync between your devices and share it with others (owner, admin, editor, viewer). Self-hosted, MIT licensed.
 Modelled on [Slinger Cloud](https://github.com/perunok/slinger-admin).
 
+![goo cloud dashboard: the Notes tab of a workspace, listing the synced notes with size, last change and who made it](docs/screenshots/02-notes.png)
+
+## Features
+
+- **Sync between devices.** Link a folder in goo (Settings > goo cloud) and its notes stay in sync on every computer.
+  Notes keep their identity across renames; edits made on two devices are merged line by line; when both changed the
+  same lines, both versions are kept as two notes instead of one being lost. Deletes reach every device.
+- **Sharing.** Workspaces with **owner**, **admin**, **editor** and **viewer** roles (viewers only download). Add people
+  by email; an email without an account becomes a pending invite that turns into a membership when the account exists.
+- **Desktop sign-in without passwords in the app.** goo shows a short code, you approve it in the browser; the app
+  keeps rotating tokens in the OS keychain. See and sign out your devices on the Account page.
+- **Dashboard.** Workspaces, a read-only view of the synced notes (rendered safely), members and invites, audit log;
+  for admins: users (temporary passwords, roles, disable), all workspaces, platform audit.
+- **Self-hosted and small.** One Docker image (API + dashboard, amd64 and arm64), PostgreSQL, Caddy for HTTPS. No
+  telemetry; your notes stay on your server.
+
+| | |
+|---|---|
+| ![Workspaces](docs/screenshots/01-workspaces.png)<br>**Workspaces** you own or were added to | ![Members](docs/screenshots/03-members.png)<br>**Members** with roles, and pending invites |
+| ![Desktop sign-in](docs/screenshots/04-approve-desktop-sign-in.png)<br>**Approve** the code goo shows to sign it in | ![Admin overview](docs/screenshots/05-admin-overview.png)<br>**Admin** overview: users, workspaces, notes, devices |
+
+Screenshots come from the dashboard's mock mode: `(cd dashboard && npm run dev:mock -- --port 5299)` and
+`node e2e/screenshots.mjs`.
+
+## Run it
+
+Use the published image ([releases](https://github.com/perunok/goo-cloud/releases)):
+
+```bash
+git clone https://github.com/perunok/goo-cloud && cd goo-cloud
+cp .env.example .env    # set GOO_BASE_URL, POSTGRES_PASSWORD, GOO_SIGNING_SECRET, GOO_ADMIN_BOOTSTRAP (first admin)
+                        # and GOO_IMAGE=ghcr.io/perunok/goo-cloud:0.1.0
+docker compose up -d --no-build
+```
+
+Then sign in on the dashboard with the bootstrap account, create users and a workspace, and in
+[goo](https://github.com/perunok/goo/releases/latest) open Settings > goo cloud, enter your server's address and
+approve the code. HTTPS with Caddy, backups and upgrades: [`deploy-manual.md`](deploy-manual.md).
+
+## Parts
+
 | Part | |
 | --- | --- |
 | [`server/`](server/README.md) | Fastify 5 + Prisma + PostgreSQL 16 API: accounts, device sign-in, workspaces, members, notes sync. [`openapi.yaml`](server/openapi.yaml) is the API contract. |
@@ -14,16 +55,8 @@ Modelled on [Slinger Cloud](https://github.com/perunok/slinger-admin).
 
 The desktop side (sync engine and the Settings > goo cloud tab) lives in the goo app.
 
-## Quick start (Docker Compose)
-
-```bash
-cp .env.example .env    # set POSTGRES_PASSWORD, GOO_SIGNING_SECRET and GOO_ADMIN_BOOTSTRAP (the first admin)
-docker compose up -d --build
-```
-
-Open <http://localhost> and sign in with the bootstrap account. HTTPS, backups and upgrades: [`deploy-manual.md`](deploy-manual.md).
-Release tags publish a multi-arch image to `ghcr.io/perunok/goo-cloud` (and Docker Hub when configured); set
-`GOO_IMAGE` in `.env` and use `docker compose up -d --no-build` to run it instead of building.
+To build the image from source instead: `docker compose up -d --build`. Release tags publish the multi-arch image to
+`ghcr.io/perunok/goo-cloud` (and Docker Hub when configured).
 
 ## Development
 
