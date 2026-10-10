@@ -1,0 +1,205 @@
+import crypto from "node:crypto";
+import { existsSync } from "node:fs";
+import { isAbsolute, join, resolve } from "node:path";
+import { z } from "zod";
+import { parseBootstrapAdmins, type BootstrapAdmin } from "./bootstrap.js";
+
+/** Thrown when configuration is invalid. The message is safe to print and never contains secret values. */
+export class ConfigError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ConfigError";
+  }
+}
+
+export type Logger = { warn: (msg: string) => void };
+
+export type AppConfig = {
+  nodeEnv: string;
+  isProduction: boolean;
+  port: number;
+  host: string;
+  databaseUrl: string;
+  signingSecret: string;
+  allowedOrigins: string[];
+  cookieSecure: boolean;
+  trustProxy: boolean;
+  baseUrl: string;
+  bodyLimitBytes: number;
+  /** Body cap for `POST .../sync/push` only (up to 200 changes; one note may hold 4 MiB). */
+  syncBodyLimitBytes: number;
+  /** Max sync requests (register/push/pull) per user per minute. */
+  syncRateLimitPerMinute: number;
+  accessTokenTtlSeconds: number;
+  refreshTokenTtlSeconds: number;
+  browserSessionTtlSeconds: number;
+  deviceFlowTtlSeconds: number;
+  loginRateLimit: { max: number; windowMs: number };
+  /** Where login attempt counters live: per-process memory (default) or shared through PostgreSQL. */
+  rateLimitStore: "memory" | "postgres";
+  logLevel: string;
+  bootstrapAdmins: BootstrapAdmin[];
+  /** Built dashboard (a directory with index.html) served at "/", or null to serve the API only. */
+  dashboardDir: string | null;
+};
+
+const PLACEHOLDER_SECRETS = new Set([
+  "change-me",
+  "changeme",
+  "change-me-in-production",
+  "secret",
+  "password",
+  "goo",
+  "please-change-me"
+]);
+
+const boolish = z
+  .string()
+  .transform((v) => v.trim().toLowerCase())
+  .pipe(z.enum(["true", "false", "1", "0"]))
+  .transform((v) => v === "true" || v === "1");
+
+const intFromEnv = (min: number, max: number) => z.coerce.number().int().min(min).max(max);
+
+const envSchema = z.object({
+  NODE_ENV: z.string().default("development"),
+  PORT: intFromEnv(1, 65535).optional(),
+  GOO_PORT: intFromEnv(1, 65535).optional(),
+  GOO_HOST: z.string().min(1).default("0.0.0.0"),
+  DATABASE_URL: z.string().min(1).optional(),
+  GOO_SIGNING_SECRET: z.string().optional(),
+  GOO_ALLOWED_ORIGINS: z.string().optional(),
+  GOO_COOKIE_SECURE: boolish.optional(),
+  GOO_TRUST_PROXY: boolish.optional(),
+  GOO_BASE_URL: z.string().url().default("http://localhost:8080"),
+  GOO_BODY_LIMIT_BYTES: intFromEnv(1024, 50_000_000).default(1_000_000),
+  // A 4 MiB note can grow up to 6x when JSON-escaped (control characters become \\u00XX): one note always fits.
+  GOO_SYNC_BODY_LIMIT_BYTES: intFromEnv(1024, 100_000_000).default(26 * 1024 * 1024),
+  GOO_SYNC_RATE_LIMIT_PER_MINUTE: intFromEnv(1, 100_000).default(120),
+  GOO_ACCESS_TOKEN_TTL: intFromEnv(60, 86_400).default(3600),
+  GOO_REFRESH_TOKEN_TTL: intFromEnv(300, 60 * 60 * 24 * 365).default(60 * 60 * 24 * 30),
+  GOO_SESSION_TTL: intFromEnv(300, 60 * 60 * 24 * 90).default(60 * 60 * 24 * 7),
+  GOO_DEVICE_FLOW_TTL: intFromEnv(60, 3600).default(600),
+  GOO_LOGIN_RATE_MAX: intFromEnv(1, 10_000).default(10),
+  GOO_LOGIN_RATE_WINDOW_SECONDS: intFromEnv(1, 86_400).default(300),
+  GOO_RATE_LIMIT_STORE: z.enum(["memory", "postgres"]).default("memory"),
+  GOO_LOG_LEVEL: z.string().default("info"),
+  GOO_ADMIN_BOOTSTRAP: z.string().optional(),
+  GOO_DASHBOARD_DIR: z.string().optional()
+});
+
+let cachedEphemeralSecret: string | undefined;
+
+/**
+ * Loads and validates configuration from the environment. All problems are collected
+ * and reported in a single ConfigError so operators can fix them in one pass.
+ */
+export function loadConfig(env: NodeJS.ProcessEnv = process.env, logger: Logger = console): AppConfig {
+  const parsed = envSchema.safeParse(env);
+  if (!parsed.success) {
+    const lines = parsed.error.issues.map((i) => `  - ${i.path.join(".") || "(env)"}: ${i.message}`);
+    throw new ConfigError(`Invalid environment configuration:\n${lines.join("\n")}`);
+  }
+  const e = parsed.data;
+  const isProduction = e.NODE_ENV === "production";
+  const problems: string[] = [];
+
+  // --- signing secret: never hardcoded ---
+  let signingSecret = e.GOO_SIGNING_SECRET?.trim() ?? "";
+  if (!signingSecret) {
+    if (isProduction) {
+      problems.push("GOO_SIGNING_SECRET is required in production (no fallback secret exists).");
+    } else {
+      if (!cachedEphemeralSecret) {
+        cachedEphemeralSecret = crypto.randomBytes(32).toString("hex");
+        logger.warn(
+          "GOO_SIGNING_SECRET is not set: using a random dev-only secret for this process. " +
+            "All access tokens and sessions become invalid on restart."
+        );
+      }
+      signingSecret = cachedEphemeralSecret;
+    }
+  } else if (isProduction) {
+    if (signingSecret.length < 32) {
+      problems.push("GOO_SIGNING_SECRET must be at least 32 characters in production.");
+    }
+    if (PLACEHOLDER_SECRETS.has(signingSecret.toLowerCase())) {
+      problems.push("GOO_SIGNING_SECRET is a known placeholder value; generate a real one (openssl rand -hex 32).");
+    }
+  }
+
+  if (isProduction && !e.DATABASE_URL) problems.push("DATABASE_URL is required in production.");
+
+  // --- bootstrap admin accounts (strictly validated) ---
+  let bootstrapAdmins: BootstrapAdmin[] = [];
+  try {
+    bootstrapAdmins = parseBootstrapAdmins(e.GOO_ADMIN_BOOTSTRAP, { isProduction });
+  } catch (err) {
+    problems.push((err as Error).message);
+  }
+
+  // --- CORS allowlist: each entry must be a bare origin ---
+  const allowedOrigins = (e.GOO_ALLOWED_ORIGINS ?? "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean)
+    .map((o) => {
+      try {
+        const u = new URL(o);
+        if (!/^https?:$/.test(u.protocol) || o.replace(/\/+$/, "") !== u.origin) throw new Error("bad");
+        return u.origin;
+      } catch {
+        problems.push(`GOO_ALLOWED_ORIGINS entry "${o}" is not a bare origin like https://dash.example.com.`);
+        return o;
+      }
+    });
+  if (allowedOrigins.includes("*")) problems.push('GOO_ALLOWED_ORIGINS must not contain "*".');
+
+  // --- cookie Secure flag: on by default in production, explicit opt-out only ---
+  const cookieSecure = e.GOO_COOKIE_SECURE ?? isProduction;
+  if (isProduction && !cookieSecure) {
+    logger.warn(
+      "GOO_COOKIE_SECURE=false in production: the session cookie will be sent over plain HTTP. " +
+        "Only do this when TLS is not terminated yet (e.g. first boot on an internal network)."
+    );
+  }
+
+  // --- bundled dashboard (set in the Docker image; unset = API only, e.g. `npm run dev`) ---
+  let dashboardDir: string | null = null;
+  if (e.GOO_DASHBOARD_DIR?.trim()) {
+    const dir = e.GOO_DASHBOARD_DIR.trim();
+    dashboardDir = isAbsolute(dir) ? dir : resolve(dir);
+    if (!existsSync(join(dashboardDir, "index.html"))) {
+      problems.push(`GOO_DASHBOARD_DIR "${dir}" has no index.html (build the dashboard with \`npm run build\` in dashboard/).`);
+    }
+  }
+
+  if (problems.length > 0) {
+    throw new ConfigError(`Refusing to start, configuration problems:\n${problems.map((p) => `  - ${p}`).join("\n")}`);
+  }
+
+  return {
+    nodeEnv: e.NODE_ENV,
+    isProduction,
+    port: e.PORT ?? e.GOO_PORT ?? 8080,
+    host: e.GOO_HOST,
+    databaseUrl: e.DATABASE_URL ?? "",
+    signingSecret,
+    allowedOrigins,
+    cookieSecure,
+    trustProxy: e.GOO_TRUST_PROXY ?? false,
+    baseUrl: e.GOO_BASE_URL.replace(/\/+$/, ""),
+    bodyLimitBytes: e.GOO_BODY_LIMIT_BYTES,
+    syncBodyLimitBytes: e.GOO_SYNC_BODY_LIMIT_BYTES,
+    syncRateLimitPerMinute: e.GOO_SYNC_RATE_LIMIT_PER_MINUTE,
+    accessTokenTtlSeconds: e.GOO_ACCESS_TOKEN_TTL,
+    refreshTokenTtlSeconds: e.GOO_REFRESH_TOKEN_TTL,
+    browserSessionTtlSeconds: e.GOO_SESSION_TTL,
+    deviceFlowTtlSeconds: e.GOO_DEVICE_FLOW_TTL,
+    loginRateLimit: { max: e.GOO_LOGIN_RATE_MAX, windowMs: e.GOO_LOGIN_RATE_WINDOW_SECONDS * 1000 },
+    rateLimitStore: e.GOO_RATE_LIMIT_STORE,
+    logLevel: e.GOO_LOG_LEVEL,
+    bootstrapAdmins,
+    dashboardDir
+  };
+}

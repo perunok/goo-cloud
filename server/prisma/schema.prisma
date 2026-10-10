@@ -1,0 +1,287 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum PlatformRole {
+  super_admin
+  platform_admin
+  user
+}
+
+enum WorkspaceRole {
+  owner
+  admin
+  editor
+  viewer
+}
+
+enum MembershipStatus {
+  active
+  removed
+}
+
+enum InviteStatus {
+  pending
+  accepted
+  revoked
+}
+
+model User {
+  id                 String       @id @default(uuid())
+  email              String       @unique
+  displayName        String
+  passwordHash       String?
+  platformRole       PlatformRole @default(user)
+  disabledAt         DateTime?
+  /// Set for admin-issued (temporary) passwords; while true the account may only call GET /v1/me, POST /v1/me/password and logout.
+  mustChangePassword Boolean      @default(false)
+  /// Embedded in access tokens (`tv` claim); bumping it invalidates every access token issued before (password change/reset, disable).
+  tokenVersion       Int          @default(0)
+  createdAt          DateTime     @default(now())
+  updatedAt          DateTime     @updatedAt
+
+  memberships      Membership[]
+  sessions         Session[]
+  refreshTokens    RefreshToken[]
+  invitesSent      Invite[]       @relation("InviteSender")
+  membershipsAdded Membership[]   @relation("MembershipAddedBy")
+  auditLogs        AuditLog[]
+  deviceFlows      DeviceFlow[]
+  ownedWorkspaces  Workspace[]    @relation("WorkspaceOwner")
+  syncClients      SyncClient[]
+  notesUpdated     Note[]         @relation("NoteUpdatedBy")
+
+  @@map("users")
+}
+
+model Session {
+  id            String   @id @default(uuid())
+  userId        String
+  user          User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tokenHash     String   @unique
+  csrfTokenHash String
+  expiresAt     DateTime
+  createdAt     DateTime @default(now())
+
+  @@index([userId])
+  @@map("sessions")
+}
+
+model RefreshToken {
+  id        String    @id @default(uuid())
+  tokenHash String    @unique
+  userId    String
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  /// One family per desktop sign-in: rotation keeps it and access tokens carry it (`fam` claim), so a registered device
+  /// (`SyncClient.tokenFamily`) can be signed out by revoking its family.
+  familyId  String
+  expiresAt DateTime
+  revokedAt DateTime?
+  createdAt DateTime  @default(now())
+
+  @@index([userId])
+  @@index([familyId])
+  @@map("refresh_tokens")
+}
+
+enum DeviceFlowStatus {
+  pending
+  approved
+  consumed
+}
+
+model DeviceFlow {
+  id             String           @id @default(uuid())
+  deviceCodeHash String           @unique
+  userCode       String           @unique
+  clientName     String
+  deviceName     String
+  status         DeviceFlowStatus @default(pending)
+  userId         String?
+  user           User?            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt      DateTime         @default(now())
+  expiresAt      DateTime
+
+  @@map("device_flows")
+}
+
+/// A synced notes folder. Each device links it to a local folder; the folder name is local and never synced.
+model Workspace {
+  id          String   @id @default(uuid())
+  slug        String   @unique
+  name        String
+  description String   @default("")
+  ownerUserId String
+  owner       User     @relation("WorkspaceOwner", fields: [ownerUserId], references: [id])
+  /// Change counter: every accepted note change takes the next value (atomic increment under the row lock) as its `seq`.
+  /// Changed with raw SQL only, so it never bumps `version` or `updatedAt`.
+  checkpoint  Int      @default(0)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  version     Int      @default(1)
+
+  memberships Membership[]
+  invites     Invite[]
+  notes       Note[]
+  syncOps     SyncOp[]
+
+  @@map("workspaces")
+}
+
+model Membership {
+  id            String           @id @default(uuid())
+  workspaceId   String
+  workspace     Workspace        @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  userId        String
+  user          User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role          WorkspaceRole
+  status        MembershipStatus @default(active)
+  /// Who added this member (an owner/admin); null for the workspace's creator.
+  addedByUserId String?
+  addedBy       User?            @relation("MembershipAddedBy", fields: [addedByUserId], references: [id], onDelete: SetNull)
+  joinedAt      DateTime         @default(now())
+  createdAt     DateTime         @default(now())
+  updatedAt     DateTime         @updatedAt
+  version       Int              @default(1)
+
+  @@unique([workspaceId, userId])
+  @@index([workspaceId])
+  @@index([userId])
+  @@index([addedByUserId])
+  @@map("memberships")
+}
+
+/// A person added by email before they had an account; becomes a membership when the account is created or signs in.
+model Invite {
+  id              String        @id @default(uuid())
+  workspaceId     String
+  workspace       Workspace     @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  email           String
+  role            WorkspaceRole
+  status          InviteStatus  @default(pending)
+  invitedByUserId String?
+  invitedBy       User?         @relation("InviteSender", fields: [invitedByUserId], references: [id], onDelete: SetNull)
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+  version         Int           @default(1)
+
+  @@index([workspaceId])
+  @@index([email])
+  @@map("invites")
+}
+
+/// One Markdown file of a workspace. `id` is made by the client that created the note (a rename only changes `path`) and
+/// is scoped to the workspace (composite key), so ids of other workspaces can neither collide nor be probed.
+///
+/// `pathKey` (NFC, lower case) is unique among the LIVE notes of a workspace through the partial unique index
+/// `notes_workspaceId_pathKey_live_key ... WHERE deleted = false`, written by hand in the init migration because Prisma
+/// cannot express partial indexes. Keep it when creating new migrations (`prisma migrate dev` may propose dropping it).
+model Note {
+  id                String
+  workspaceId       String
+  workspace         Workspace   @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  path              String
+  pathKey           String
+  /// UTF-8 text, at most 4 MiB; "" for tombstones.
+  content           String
+  /// SHA-256 of `content` (hex), computed by the server.
+  contentHash       String
+  /// UTF-8 byte length of `content` (listed without loading the content).
+  size              Int
+  /// Starts at 1, +1 on every accepted change.
+  version           Int         @default(1)
+  /// Tombstone: deleted notes stay (content cleared) so every device learns about the delete.
+  deleted           Boolean     @default(false)
+  /// The workspace checkpoint taken by the note's last change.
+  seq               Int
+  updatedById       String?
+  updatedBy         User?       @relation("NoteUpdatedBy", fields: [updatedById], references: [id], onDelete: SetNull)
+  updatedByClientId String?
+  updatedByClient   SyncClient? @relation(fields: [updatedByClientId], references: [id], onDelete: SetNull)
+  createdAt         DateTime    @default(now())
+  updatedAt         DateTime    @updatedAt
+
+  @@id([workspaceId, id])
+  @@unique([workspaceId, seq])
+  @@index([workspaceId, createdAt])
+  @@index([updatedById])
+  @@index([updatedByClientId])
+  @@map("notes")
+}
+
+/// Outcome of every applied push change, by `(workspace, op_id)`: a replayed change gets the same answer and changes
+/// nothing. Rows older than 30 days are swept hourly (clients replay within seconds or minutes).
+model SyncOp {
+  workspaceId String
+  workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  opId        String
+  noteId      String
+  /// "accepted" or the rejection reason.
+  outcome     String
+  /// Accepted: the resulting note version and seq.
+  version     Int?
+  seq         Int?
+  /// Rejected: the message sent with the rejection.
+  message     String?
+  createdAt   DateTime  @default(now())
+
+  @@id([workspaceId, opId])
+  @@index([createdAt])
+  @@map("sync_ops")
+}
+
+/// A device (one row per user and installation) registered for sync.
+model SyncClient {
+  id          String   @id @default(uuid())
+  userId      String
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  deviceName  String
+  platform    String
+  appVersion  String
+  /// Refresh-token family of the desktop sign-in that registered the device (null when registered with a dashboard
+  /// session); signing the device out revokes it.
+  tokenFamily String?
+  createdAt   DateTime @default(now())
+  lastSeenAt  DateTime @default(now())
+
+  notesUpdated Note[]
+
+  @@index([userId])
+  @@map("sync_clients")
+}
+
+// Append-only. workspaceId is deliberately NOT a foreign key so the trail
+// survives workspace deletion (including the deletion event itself).
+model AuditLog {
+  id           String   @id @default(uuid())
+  actorUserId  String?
+  actor        User?    @relation(fields: [actorUserId], references: [id], onDelete: SetNull)
+  action       String
+  resourceType String   @default("")
+  resourceId   String   @default("")
+  workspaceId  String?
+  requestId    String?
+  details      Json?
+  createdAt    DateTime @default(now())
+
+  @@index([workspaceId, createdAt])
+  @@index([createdAt])
+  @@index([actorUserId])
+  @@map("audit_logs")
+}
+
+// Fixed-window counters for the optional shared login rate limiter (GOO_RATE_LIMIT_STORE=postgres).
+// `key` is a SHA-256 of the limiter key (IP + email), so no e-mail addresses are stored here.
+model RateLimitBucket {
+  key       String   @id
+  count     Int
+  expiresAt DateTime
+
+  @@index([expiresAt])
+  @@map("rate_limit_buckets")
+}

@@ -1,0 +1,4339 @@
+openapi: 3.0.3
+info:
+  title: goo cloud API
+  version: 1.0.0
+  description: |-
+    Generated from the zod schemas of the routes registered in `server/src`; do not edit by hand (`npm run openapi`).
+
+    Auth: `Authorization: Bearer <access token>` (desktop) or the `goo_session` httpOnly cookie (dashboard). Cookie-authenticated unsafe requests must send `X-CSRF-Token` (from `POST /v1/auth/browser/login` or `GET /v1/auth/browser/session`).
+
+    Every response carries `X-Request-Id`, echoed in `error.request_id`. List endpoints use cursor pagination (`?cursor=&limit=&order=`) and return `{ items, page: { next_cursor, has_more } }`.
+
+    Note sync: `POST /v1/sync/clients/register`, then `GET .../sync/pull` and `POST .../sync/push` per workspace; push rejections carry a `reason` to branch on.
+
+    The same routes are reachable at `/v1/...` and, for the dashboard, `/api/v1/...`.
+servers:
+  - url: http://localhost:8080
+    description: Direct to the server container
+tags:
+  - name: System
+  - name: Auth
+  - name: Workspaces
+  - name: Membership
+  - name: Notes
+  - name: Sync
+  - name: Admin
+paths:
+  /healthz:
+    get:
+      operationId: getHealthz
+      summary: Liveness/readiness probe; verifies the database is reachable (503 otherwise)
+      tags:
+        - System
+      security: []
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum:
+                      - ok
+                      - degraded
+                  timestamp:
+                    type: string
+                required:
+                  - status
+                  - timestamp
+                additionalProperties: false
+        "503":
+          description: Service unavailable
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum:
+                      - ok
+                      - degraded
+                  timestamp:
+                    type: string
+                required:
+                  - status
+                  - timestamp
+                additionalProperties: false
+  /device:
+    get:
+      operationId: getDevice
+      summary: Device login approval page (HTML). Open from `verification_uri_complete`.
+      tags:
+        - Auth
+      security: []
+      responses:
+        "200":
+          description: OK
+          content:
+            text/html:
+              schema:
+                type: string
+      parameters:
+        - name: user_code
+          in: query
+          required: false
+          schema:
+            type: string
+            maxLength: 16
+    post:
+      operationId: postDevice
+      summary: Submit code + email + password (urlencoded form) to approve a device login
+      tags:
+        - Auth
+      security: []
+      responses:
+        "200":
+          description: OK
+          content:
+            text/html:
+              schema:
+                type: string
+        "400":
+          description: Invalid request (zod validation failed, malformed JSON, bad cursor)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: Unauthenticated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: Forbidden
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "429":
+          description: Rate limited
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+      description: Rate limited per IP+email pair like the login endpoints. Accounts that must change an admin-issued password are refused (403 page with instructions) until they have done so in the dashboard.
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              properties:
+                user_code:
+                  type: string
+                  minLength: 4
+                  maxLength: 16
+                email:
+                  type: string
+                  format: email
+                  maxLength: 254
+                password:
+                  type: string
+                  minLength: 1
+                  maxLength: 256
+              required:
+                - user_code
+                - email
+                - password
+              additionalProperties: false
+  /v1/auth/browser/login:
+    post:
+      operationId: postV1AuthBrowserLogin
+      summary: Dashboard login (email + password). Sets the httpOnly session cookie and returns the CSRF token.
+      tags:
+        - Auth
+      security: []
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  user:
+                    type: object
+                    properties:
+                      id:
+                        type: string
+                      email:
+                        type: string
+                      display_name:
+                        type: string
+                      platform_role:
+                        type: string
+                        enum:
+                          - super_admin
+                          - platform_admin
+                          - user
+                      must_change_password:
+                        type: boolean
+                    required:
+                      - id
+                      - email
+                      - display_name
+                      - platform_role
+                      - must_change_password
+                    additionalProperties: false
+                  csrf_token:
+                    type: string
+                required:
+                  - user
+                  - csrf_token
+                additionalProperties: false
+        "400":
+          description: Invalid request (zod validation failed, malformed JSON, bad cursor)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: Unauthenticated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "429":
+          description: Rate limited
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+      description: "Rate limited per IP+email pair (default 10 attempts / 5 minutes, 429 rate_limited). Cookie: `goo_session`, httpOnly, SameSite=Lax, Secure when GOO_COOKIE_SECURE is true (default in production). Each successful sign-in is audited (`auth.login`)."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                email:
+                  type: string
+                  format: email
+                  maxLength: 254
+                password:
+                  type: string
+                  minLength: 1
+                  maxLength: 256
+              required:
+                - email
+                - password
+              additionalProperties: false
+  /v1/auth/device/start:
+    post:
+      operationId: postV1AuthDeviceStart
+      summary: Start the desktop device login flow
+      tags:
+        - Auth
+      security: []
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  device_code:
+                    type: string
+                  user_code:
+                    type: string
+                  verification_uri:
+                    type: string
+                  verification_uri_complete:
+                    type: string
+                  expires_in:
+                    type: integer
+                  interval:
+                    type: integer
+                required:
+                  - device_code
+                  - user_code
+                  - verification_uri
+                  - verification_uri_complete
+                  - expires_in
+                  - interval
+                additionalProperties: false
+        "400":
+          description: Invalid request (zod validation failed, malformed JSON, bad cursor)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "429":
+          description: Rate limited
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                client_name:
+                  type: string
+                  minLength: 1
+                  maxLength: 100
+                device_name:
+                  type: string
+                  minLength: 1
+                  maxLength: 200
+              required:
+                - client_name
+                - device_name
+              additionalProperties: false
+  /v1/auth/device/poll:
+    post:
+      operationId: postV1AuthDevicePoll
+      summary: Poll a device login; returns tokens once approved (exactly once)
+      tags:
+        - Auth
+      security: []
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                anyOf:
+                  - type: object
+                    properties:
+                      status:
+                        type: string
+                        enum:
+                          - pending
+                    required:
+                      - status
+                    additionalProperties: false
+                  - type: object
+                    properties:
+                      status:
+                        type: string
+                        enum:
+                          - expired
+                    required:
+                      - status
+                    additionalProperties: false
+                  - type: object
+                    properties:
+                      status:
+                        type: string
+                        enum:
+                          - denied
+                      reason:
+                        type: string
+                        enum:
+                          - password_change_required
+                      message:
+                        type: string
+                    required:
+                      - status
+                      - reason
+                      - message
+                    additionalProperties: false
+                  - type: object
+                    properties:
+                      access_token:
+                        type: string
+                      refresh_token:
+                        type: string
+                      expires_in:
+                        type: integer
+                      token_type:
+                        type: string
+                        enum:
+                          - Bearer
+                      status:
+                        type: string
+                        enum:
+                          - approved
+                      user:
+                        type: object
+                        properties:
+                          id:
+                            type: string
+                          email:
+                            type: string
+                          display_name:
+                            type: string
+                          platform_role:
+                            type: string
+                            enum:
+                              - super_admin
+                              - platform_admin
+                              - user
+                          must_change_password:
+                            type: boolean
+                        required:
+                          - id
+                          - email
+                          - display_name
+                          - platform_role
+                          - must_change_password
+                        additionalProperties: false
+                    required:
+                      - access_token
+                      - refresh_token
+                      - expires_in
+                      - token_type
+                      - status
+                      - user
+                    additionalProperties: false
+        "400":
+          description: Invalid request (zod validation failed, malformed JSON, bad cursor)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "429":
+          description: Rate limited
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+      description: "`denied` (reason `password_change_required`) means the approving account must change its admin-issued password first; the flow is finished and no tokens are issued."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                device_code:
+                  type: string
+                  minLength: 8
+                  maxLength: 200
+              required:
+                - device_code
+              additionalProperties: false
+  /v1/auth/refresh:
+    post:
+      operationId: postV1AuthRefresh
+      summary: Rotate a refresh token for a new access/refresh pair
+      tags:
+        - Auth
+      security: []
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  access_token:
+                    type: string
+                  refresh_token:
+                    type: string
+                  expires_in:
+                    type: integer
+                  token_type:
+                    type: string
+                    enum:
+                      - Bearer
+                required:
+                  - access_token
+                  - refresh_token
+                  - expires_in
+                  - token_type
+                additionalProperties: false
+        "400":
+          description: Invalid request (zod validation failed, malformed JSON, bad cursor)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: Unauthenticated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "429":
+          description: Rate limited
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+      description: Refresh tokens are single-use. Presenting an already-used token revokes every refresh token of that user.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                refresh_token:
+                  type: string
+                  minLength: 8
+                  maxLength: 500
+              required:
+                - refresh_token
+              additionalProperties: false
+  /v1/auth/device/approve:
+    post:
+      operationId: postV1AuthDeviceApprove
+      summary: Approve a pending device login (used by the dashboard for the signed-in user)
+      tags:
+        - Auth
+      security:
+        - bearerAuth: []
+        - cookieAuth: []
+          csrfToken: []
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                    enum:
+                      - true
+                required:
+                  - ok
+                additionalProperties: false
+        "400":
+          description: Invalid request (zod validation failed, malformed JSON, bad cursor)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: Unauthenticated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: Forbidden
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+      description: Binds the pending device flow with this `user_code` to the caller. Cookie callers must send X-CSRF-Token. Refused with `403 password_change_required` while the caller must change their password. Audited (`auth.device_approved`).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                user_code:
+                  type: string
+                  minLength: 4
+                  maxLength: 16
+              required:
+                - user_code
+              additionalProperties: false
+  /v1/auth/logout:
+    post:
+      operationId: postV1AuthLogout
+      summary: Revoke a refresh token (desktop logout). Always succeeds.
+      tags:
+        - Auth
+      security: []
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                    enum:
+                      - true
+                required:
+                  - ok
+                additionalProperties: false
+        "400":
+          description: Invalid request (zod validation failed, malformed JSON, bad cursor)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                refresh_token:
+                  type: string
+                  minLength: 8
+                  maxLength: 500
+              required:
+                - refresh_token
+              additionalProperties: false
+  /v1/auth/browser/logout:
+    post:
+      operationId: postV1AuthBrowserLogout
+      summary: "Dashboard logout: deletes the server-side session and clears the cookie"
+      tags:
+        - Auth
+      security:
+        - bearerAuth: []
+        - cookieAuth: []
+          csrfToken: []
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                    enum:
+                      - true
+                required:
+                  - ok
+                additionalProperties: false
+        "401":
+          description: Unauthenticated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: Forbidden
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+      description: Also usable while the account must change its password (`must_change_password`); every route without this note answers `403 password_change_required` then.
+  /v1/auth/browser/session:
+    get:
+      operationId: getV1AuthBrowserSession
+      summary: "Current dashboard session: user + CSRF token (recoverable after a page reload)"
+      tags:
+        - Auth
+      security:
+        - bearerAuth: []
+        - cookieAuth: []
+          csrfToken: []
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  user:
+                    type: object
+                    properties:
+                      id:
+                        type: string
+                      email:
+                        type: string
+                      display_name:
+                        type: string
+                      platform_role:
+                        type: string
+                        enum:
+                          - super_admin
+                          - platform_admin
+                          - user
+                      must_change_password:
+                        type: boolean
+                    required:
+                      - id
+                      - email
+                      - display_name
+                      - platform_role
+                      - must_change_password
+                    additionalProperties: false
+                  csrf_token:
+                    type: string
+                required:
+                  - user
+                  - csrf_token
+                additionalProperties: false
+        "400":
+          description: Invalid request (zod validation failed, malformed JSON, bad cursor)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: Unauthenticated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+      description: |-
+        The CSRF token is HMAC-derived from the session id, so it can be re-issued without rotating. Only readable by allowlisted/same origins (CORS).
+
+        Also usable while the account must change its password (`must_change_password`); every route without this note answers `403 password_change_required` then.
+  /v1/me:
+    get:
+      operationId: getV1Me
+      summary: Current user and their active workspace memberships
+      tags:
+        - Auth
+      security:
+        - bearerAuth: []
+        - cookieAuth: []
+          csrfToken: []
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  user:
+                    type: object
+                    properties:
+                      id:
+                        type: string
+                      email:
+                        type: string
+                      display_name:
+                        type: string
+                      platform_role:
+                        type: string
+                        enum:
+                          - super_admin
+                          - platform_admin
+                          - user
+                      must_change_password:
+                        type: boolean
+                    required:
+                      - id
+                      - email
+                      - display_name
+                      - platform_role
+                      - must_change_password
+                    additionalProperties: false
+                  workspace_memberships:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        workspace_id:
+                          type: string
+                        role:
+                          type: string
+                          enum:
+                            - owner
+                            - admin
+                            - editor
+                            - viewer
+                      required:
+                        - workspace_id
+                        - role
+                      additionalProperties: false
+                required:
+                  - user
+                  - workspace_memberships
+                additionalProperties: false
+        "401":
+          description: Unauthenticated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+      description: Also usable while the account must change its password (`must_change_password`); every route without this note answers `403 password_change_required` then.
+  /v1/me/password:
+    post:
+      operationId: postV1MePassword
+      summary: Change own password; signs out every other session and device
+      tags:
+        - Auth
+      security:
+        - bearerAuth: []
+        - cookieAuth: []
+          csrfToken: []
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                    enum:
+                      - true
+                required:
+                  - ok
+                additionalProperties: false
+        "400":
+          description: Invalid request (zod validation failed, malformed JSON, bad cursor)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: Unauthenticated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: Forbidden
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "429":
+          description: Rate limited
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+      description: |-
+        Policy: 12-256 characters and different from the current password. A wrong `current_password` answers `403 forbidden` with `details.reason: invalid_current_password`. Rate limited per user like the login endpoints (`429 rate_limited`, `Retry-After`). On success `must_change_password` is cleared, every refresh token is revoked, every access token issued so far stops working and every dashboard session except the caller's own cookie session is deleted (a Bearer caller must sign in again).
+
+        Also usable while the account must change its password (`must_change_password`); every route without this note answers `403 password_change_required` then.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                current_password:
+                  type: string
+                  minLength: 1
+                  maxLength: 256
+                new_password:
+                  type: string
+                  minLength: 12
+                  maxLength: 256
+              required:
+                - current_password
+                - new_password
+              additionalProperties: false
+  /v1/workspaces:
+    get:
+      operationId: getV1Workspaces
+      summary: Workspaces the caller is an active member of (with the caller's role)
+      tags:
+        - Workspaces
+      security:
+        - bearerAuth: []
+        - cookieAuth: []
+          csrfToken: []
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id:
+                          type: string
+                        slug:
+                          type: string
+                        name:
+                          type: string
+                        description:
+                          type: string
+                        owner_user_id:
+                          type: string
+                        created_at:
+                          type: string
+                          format: date-time
+                        updated_at:
+                          type: string
+                          format: date-time
+                        version:
+                          type: integer
+                        role:
+                          type: string
+                          enum:
+                            - owner
+                            - admin
+                            - editor
+                            - viewer
+                        joined_at:
+                          type: string
+                          format: date-time
+                        added_by:
+                          type: object
+                          properties:
+                            id:
+                              type: string
+                            display_name:
+                              type: string
+                          required:
+                            - id
+                            - display_name
+                          additionalProperties: false
+                          nullable: true
+                      required:
+                        - id
+                        - slug
+                        - name
+                        - description
+                        - owner_user_id
+                        - created_at
+                        - updated_at
+                        - version
+                        - role
+                        - joined_at
+                        - added_by
+                      additionalProperties: false
+                  page:
+                    type: object
+                    properties:
+                      next_cursor:
+                        type: string
+                        nullable: true
+                      has_more:
+                        type: boolean
+                    required:
+                      - next_cursor
+                      - has_more
+                    additionalProperties: false
+                required:
+                  - items
+                  - page
+                additionalProperties: false
+        "400":
+          description: Invalid request (zod validation failed, malformed JSON, bad cursor)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: Unauthenticated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+      description: Platform admins see every workspace via GET /v1/admin/workspaces instead.
+      parameters:
+        - name: cursor
+          in: query
+          required: false
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 512
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+        - name: order
+          in: query
+          required: false
+          schema:
+            type: string
+            enum:
+              - asc
+              - desc
+            default: asc
+    post:
+      operationId: postV1Workspaces
+      summary: Create a workspace (a synced notes folder); the caller becomes its owner
+      tags:
+        - Workspaces
+      security:
+        - bearerAuth: []
+        - cookieAuth: []
+          csrfToken: []
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  workspace:
+                    type: object
+                    properties:
+                      id:
+                        type: string
+                      slug:
+                        type: string
+                      name:
+                        type: string
+                      description:
+                        type: string
+                      owner_user_id:
+                        type: string
+                      created_at:
+                        type: string
+                        format: date-time
+                      updated_at:
+                        type: string
+                        format: date-time
+                      version:
+                        type: integer
+                    required:
+                      - id
+                      - slug
+                      - name
+                      - description
+                      - owner_user_id
+                      - created_at
+                      - updated_at
+                      - version
+                    additionalProperties: false
+                required:
+                  - workspace
+                additionalProperties: false
+        "400":
+          description: Invalid request (zod validation failed, malformed JSON, bad cursor)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: Unauthenticated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: Conflict / version_mismatch
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name:
+                  type: string
+                  minLength: 1
+                  maxLength: 120
+                slug:
+                  type: string
+                  minLength: 3
+                  maxLength: 63
+                  pattern: ^[a-z0-9]+(?:-[a-z0-9]+)*$
+                description:
+                  type: string
+                  maxLength: 2000
+                  default: ""
+              required:
+                - name
+              additionalProperties: false
+  /v1/workspaces/{workspaceId}:
+    get:
+      operationId: getV1WorkspacesWorkspaceId
+      summary: Workspace metadata and the caller's membership
+      tags:
+        - Workspaces
+      security:
+        - bearerAuth: []
+        - cookieAuth: []
+          csrfToken: []
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  workspace:
+                    type: object
+                    properties:
+                      id:
+                        type: string
+                      slug:
+                        type: string
+                      name:
+                        type: string
+                      description:
+                        type: string
+                      owner_user_id:
+                        type: string
+                      created_at:
+                        type: string
+                        format: date-time
+                      updated_at:
+                        type: string
+                        format: date-time
+                      version:
+                        type: integer
+                    required:
+                      - id
+                      - slug
+                      - name
+                      - description
+                      - owner_user_id
+                      - created_at
+                      - updated_at
+                      - version
+                    additionalProperties: false
+                  membership:
+                    type: object
+                    properties:
+                      role:
+                        type: string
+                        enum:
+                          - owner
+                          - admin
+                          - editor
+                          - viewer
+                    required:
+                      - role
+                    additionalProperties: false
+                    nullable: true
+                required:
+                  - workspace
+                  - membership
+                additionalProperties: false
+        "401":
+          description: Unauthenticated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: Forbidden
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+      description: "**Access:** any active member, or platform admin (membership is null for non-member platform admins)."
+      parameters:
+        - name: workspaceId
+          in: path
+          required: true
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 64
+      x-access: any active member, or platform admin (membership is null for non-member platform admins)
+    patch:
+      operationId: patchV1WorkspacesWorkspaceId
+      summary: Rename a workspace or change its description (optimistic concurrency via `version`)
+      tags:
+        - Workspaces
+      security:
+        - bearerAuth: []
+        - cookieAuth: []
+          csrfToken: []
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  workspace:
+                    type: object
+                    properties:
+                      id:
+                        type: string
+                      slug:
+                        type: string
+                      name:
+                        type: string
+                      description:
+                        type: string
+                      owner_user_id:
+                        type: string
+                      created_at:
+                        type: string
+                        format: date-time
+                      updated_at:
+                        type: string
+                        format: date-time
+                      version:
+                        type: integer
+                    required:
+                      - id
+                      - slug
+                      - name
+                      - description
+                      - owner_user_id
+                      - created_at
+                      - updated_at
+                      - version
+                    additionalProperties: false
+                required:
+                  - workspace
+                additionalProperties: false
+        "400":
+          description: Invalid request (zod validation failed, malformed JSON, bad cursor)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: Unauthenticated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: Forbidden
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: Conflict / version_mismatch
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+      description: "**Access:** workspace owner, or platform admin."
+      parameters:
+        - name: workspaceId
+          in: path
+          required: true
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 64
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name:
+                  type: string
+                  minLength: 1
+                  maxLength: 120
+                description:
+                  type: string
+                  maxLength: 2000
+                version:
+                  type: integer
+                  minimum: 1
+              required:
+                - version
+              additionalProperties: false
+      x-access: workspace owner, or platform admin
+    delete:
+      operationId: deleteV1WorkspacesWorkspaceId
+      summary: Delete a workspace and all of its notes
+      tags:
+        - Workspaces
+      security:
+        - bearerAuth: []
+        - cookieAuth: []
+          csrfToken: []
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                    enum:
+                      - true
+                required:
+                  - ok
+                additionalProperties: false
+        "401":
+          description: Unauthenticated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: Forbidden
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: Conflict / version_mismatch
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+      description: "**Access:** workspace owner, or super_admin (platform_admin is NOT sufficient)."
+      parameters:
+        - name: workspaceId
+          in: path
+          required: true
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 64
+        - name: version
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+      x-access: workspace owner, or super_admin (platform_admin is NOT sufficient)
+  /v1/workspaces/{workspaceId}/transfer:
+    post:
+      operationId: postV1WorkspacesWorkspaceIdTransfer
+      summary: Transfer ownership to another active member; the previous owner stays as admin
+      tags:
+        - Workspaces
+      security:
+        - bearerAuth: []
+        - cookieAuth: []
+          csrfToken: []
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  workspace:
+                    type: object
+                    properties:
+                      id:
+                        type: string
+                      slug:
+                        type: string
+                      name:
+                        type: string
+                      description:
+                        type: string
+                      owner_user_id:
+                        type: string
+                      created_at:
+                        type: string
+                        format: date-time
+                      updated_at:
+                        type: string
+                        format: date-time
+                      version:
+                        type: integer
+                    required:
+                      - id
+                      - slug
+                      - name
+                      - description
+                      - owner_user_id
+                      - created_at
+                      - updated_at
+                      - version
+                    additionalProperties: false
+                required:
+                  - workspace
+                additionalProperties: false
+        "400":
+          description: Invalid request (zod validation failed, malformed JSON, bad cursor)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: Unauthenticated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: Forbidden
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: Conflict / version_mismatch
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+      description: |-
+        `member_id` is the membership id of the new owner (from the members list); `version` is the workspace version (optimistic concurrency, 409 `version_mismatch` when stale). The workspace version is bumped.
+
+        **Access:** workspace owner, or super_admin.
+      parameters:
+        - name: workspaceId
+          in: path
+          required: true
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 64
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                member_id:
+                  type: string
+                  minLength: 1
+                  maxLength: 64
+                version:
+                  type: integer
+                  minimum: 1
+              required:
+                - member_id
+                - version
+              additionalProperties: false
+      x-access: workspace owner, or super_admin
+  /v1/workspaces/{workspaceId}/members:
+    get:
+      operationId: getV1WorkspacesWorkspaceIdMembers
+      summary: List active members
+      tags:
+        - Membership
+      security:
+        - bearerAuth: []
+        - cookieAuth: []
+          csrfToken: []
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id:
+                          type: string
+                        workspace_id:
+                          type: string
+                        user_id:
+                          type: string
+                        email:
+                          type: string
+                        display_name:
+                          type: string
+                        role:
+                          type: string
+                          enum:
+                            - owner
+                            - admin
+                            - editor
+                            - viewer
+                        status:
+                          type: string
+                          enum:
+                            - active
+                            - removed
+                        joined_at:
+                          type: string
+                          format: date-time
+                        created_at:
+                          type: string
+                          format: date-time
+                        updated_at:
+                          type: string
+                          format: date-time
+                        version:
+                          type: integer
+                      required:
+                        - id
+                        - workspace_id
+                        - user_id
+                        - email
+                        - display_name
+                        - role
+                        - status
+                        - joined_at
+                        - created_at
+                        - updated_at
+                        - version
+                      additionalProperties: false
+                  page:
+                    type: object
+                    properties:
+                      next_cursor:
+                        type: string
+                        nullable: true
+                      has_more:
+                        type: boolean
+                    required:
+                      - next_cursor
+                      - has_more
+                    additionalProperties: false
+                required:
+                  - items
+                  - page
+                additionalProperties: false
+        "400":
+          description: Invalid request (zod validation failed, malformed JSON, bad cursor)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: Unauthenticated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: Forbidden
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+      description: "**Access:** any active member, or platform admin."
+      parameters:
+        - name: workspaceId
+          in: path
+          required: true
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 64
+        - name: cursor
+          in: query
+          required: false
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 512
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+        - name: order
+          in: query
+          required: false
+          schema:
+            type: string
+            enum:
+              - asc
+              - desc
+            default: asc
+      x-access: any active member, or platform admin
+    post:
+      operationId: postV1WorkspacesWorkspaceIdMembers
+      summary: Add a member by email
+      tags:
+        - Membership
+      security:
+        - bearerAuth: []
+        - cookieAuth: []
+          csrfToken: []
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                anyOf:
+                  - type: object
+                    properties:
+                      status:
+                        type: string
+                        enum:
+                          - added
+                      member:
+                        type: object
+                        properties:
+                          id:
+                            type: string
+                          workspace_id:
+                            type: string
+                          user_id:
+                            type: string
+                          email:
+                            type: string
+                          display_name:
+                            type: string
+                          role:
+                            type: string
+                            enum:
+                              - owner
+                              - admin
+                              - editor
+                              - viewer
+                          status:
+                            type: string
+                            enum:
+                              - active
+                              - removed
+                          joined_at:
+                            type: string
+                            format: date-time
+                          created_at:
+                            type: string
+                            format: date-time
+                          updated_at:
+                            type: string
+                            format: date-time
+                          version:
+                            type: integer
+                        required:
+                          - id
+                          - workspace_id
+                          - user_id
+                          - email
+                          - display_name
+                          - role
+                          - status
+                          - joined_at
+                          - created_at
+                          - updated_at
+                          - version
+                        additionalProperties: false
+                    required:
+                      - status
+                      - member
+                    additionalProperties: false
+                  - type: object
+                    properties:
+                      status:
+                        type: string
+                        enum:
+                          - pending
+                      invite:
+                        type: object
+                        properties:
+                          id:
+                            type: string
+                          workspace_id:
+                            type: string
+                          email:
+                            type: string
+                          role:
+                            type: string
+                            enum:
+                              - owner
+                              - admin
+                              - editor
+                              - viewer
+                          status:
+                            type: string
+                            enum:
+                              - pending
+                              - accepted
+                              - revoked
+                          invited_by_user_id:
+                            type: string
+                            nullable: true
+                          created_at:
+                            type: string
+                            format: date-time
+                          updated_at:
+                            type: string
+                            format: date-time
+                          version:
+                            type: integer
+                        required:
+                          - id
+                          - workspace_id
+                          - email
+                          - role
+                          - status
+                          - invited_by_user_id
+                          - created_at
+                          - updated_at
+                          - version
+                        additionalProperties: false
+                    required:
+                      - status
+                      - invite
+                    additionalProperties: false
+        "400":
+          description: Invalid request (zod validation failed, malformed JSON, bad cursor)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: Unauthenticated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: Forbidden
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: Conflict / version_mismatch
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+      description: |-
+        An existing account becomes an active member at once (`status: "added"`); the workspace then shows up in their dashboard and desktop app. An email without an account gets a pending invite (`status: "pending"`, no token, no expiry) that becomes a membership as soon as an account with that email is created or signs in. 409 when the email is already an active member or already pending. Nobody can grant a role above their own.
+
+        **Access:** workspace owner/admin, or platform admin.
+      parameters:
+        - name: workspaceId
+          in: path
+          required: true
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 64
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                email:
+                  type: string
+                  format: email
+                  maxLength: 254
+                role:
+                  type: string
+                  enum:
+                    - admin
+                    - editor
+                    - viewer
+              required:
+                - email
+                - role
+              additionalProperties: false
+      x-access: workspace owner/admin, or platform admin
+  /v1/workspaces/{workspaceId}/members/{memberId}:
+    patch:
+      operationId: patchV1WorkspacesWorkspaceIdMembersMemberId
+      summary: Change a member's role (the workspace owner's role cannot be changed; use transfer)
+      tags:
+        - Membership
+      security:
+        - bearerAuth: []
+        - cookieAuth: []
+          csrfToken: []
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  member:
+                    type: object
+                    properties:
+                      id:
+                        type: string
+                      workspace_id:
+                        type: string
+                      user_id:
+                        type: string
+                      email:
+                        type: string
+                      display_name:
+                        type: string
+                      role:
+                        type: string
+                        enum:
+                          - owner
+                          - admin
+                          - editor
+                          - viewer
+                      status:
+                        type: string
+                        enum:
+                          - active
+                          - removed
+                      joined_at:
+                        type: string
+                        format: date-time
+                      created_at:
+                        type: string
+                        format: date-time
+                      updated_at:
+                        type: string
+                        format: date-time
+                      version:
+                        type: integer
+                    required:
+                      - id
+                      - workspace_id
+                      - user_id
+                      - email
+                      - display_name
+                      - role
+                      - status
+                      - joined_at
+                      - created_at
+                      - updated_at
+                      - version
+                    additionalProperties: false
+                required:
+                  - member
+                additionalProperties: false
+        "400":
+          description: Invalid request (zod validation failed, malformed JSON, bad cursor)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: Unauthenticated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: Forbidden
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: Conflict / version_mismatch
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+      description: |-
+        A workspace admin may change only editors and viewers and grant at most `admin`; the owner and platform admins may change anyone but the owner.
+
+        **Access:** workspace owner/admin, or platform admin.
+      parameters:
+        - name: workspaceId
+          in: path
+          required: true
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 64
+        - name: memberId
+          in: path
+          required: true
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 64
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                role:
+                  type: string
+                  enum:
+                    - admin
+                    - editor
+                    - viewer
+                version:
+                  type: integer
+                  minimum: 1
+              required:
+                - role
+                - version
+              additionalProperties: false
+      x-access: workspace owner/admin, or platform admin
+    delete:
+      operationId: deleteV1WorkspacesWorkspaceIdMembersMemberId
+      summary: "Remove a member (soft: status becomes `removed`); the owner cannot be removed"
+      tags:
+        - Membership
+      security:
+        - bearerAuth: []
+        - cookieAuth: []
+          csrfToken: []
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                    enum:
+                      - true
+                required:
+                  - ok
+                additionalProperties: false
+        "401":
+          description: Unauthenticated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: Forbidden
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: Conflict / version_mismatch
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+      description: |-
+        A workspace admin may remove only editors and viewers.
+
+        **Access:** workspace owner/admin, or platform admin.
+      parameters:
+        - name: workspaceId
+          in: path
+          required: true
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 64
+        - name: memberId
+          in: path
+          required: true
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 64
+        - name: version
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+      x-access: workspace owner/admin, or platform admin
+  /v1/workspaces/{workspaceId}/leave:
+    post:
+      operationId: postV1WorkspacesWorkspaceIdLeave
+      summary: Leave a workspace (the owner must transfer ownership or delete the workspace instead)
+      tags:
+        - Membership
+      security:
+        - bearerAuth: []
+        - cookieAuth: []
+          csrfToken: []
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                    enum:
+                      - true
+                required:
+                  - ok
+                additionalProperties: false
+        "401":
+          description: Unauthenticated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: Forbidden
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+      description: "**Access:** any active member except the owner."
+      parameters:
+        - name: workspaceId
+          in: path
+          required: true
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 64
+      x-access: any active member except the owner
+  /v1/workspaces/{workspaceId}/invites:
+    get:
+      operationId: getV1WorkspacesWorkspaceIdInvites
+      summary: List people added before they had an account (`?status=pending` for the open ones)
+      tags:
+        - Membership
+      security:
+        - bearerAuth: []
+        - cookieAuth: []
+          csrfToken: []
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id:
+                          type: string
+                        workspace_id:
+                          type: string
+                        email:
+                          type: string
+                        role:
+                          type: string
+                          enum:
+                            - owner
+                            - admin
+                            - editor
+                            - viewer
+                        status:
+                          type: string
+                          enum:
+                            - pending
+                            - accepted
+                            - revoked
+                        invited_by_user_id:
+                          type: string
+                          nullable: true
+                        created_at:
+                          type: string
+                          format: date-time
+                        updated_at:
+                          type: string
+                          format: date-time
+                        version:
+                          type: integer
+                      required:
+                        - id
+                        - workspace_id
+                        - email
+                        - role
+                        - status
+                        - invited_by_user_id
+                        - created_at
+                        - updated_at
+                        - version
+                      additionalProperties: false
+                  page:
+                    type: object
+                    properties:
+                      next_cursor:
+                        type: string
+                        nullable: true
+                      has_more:
+                        type: boolean
+                    required:
+                      - next_cursor
+                      - has_more
+                    additionalProperties: false
+                required:
+                  - items
+                  - page
+                additionalProperties: false
+        "400":
+          description: Invalid request (zod validation failed, malformed JSON, bad cursor)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: Unauthenticated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: Forbidden
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+      description: "**Access:** workspace owner/admin, or platform admin."
+      parameters:
+        - name: workspaceId
+          in: path
+          required: true
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 64
+        - name: cursor
+          in: query
+          required: false
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 512
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+        - name: order
+          in: query
+          required: false
+          schema:
+            type: string
+            enum:
+              - asc
+              - desc
+            default: asc
+        - name: status
+          in: query
+          required: false
+          schema:
+            type: string
+            enum:
+              - pending
+              - accepted
+              - revoked
+      x-access: workspace owner/admin, or platform admin
+  /v1/workspaces/{workspaceId}/invites/{inviteId}:
+    delete:
+      operationId: deleteV1WorkspacesWorkspaceIdInvitesInviteId
+      summary: Cancel a pending addition (the person is not added when their account is created)
+      tags:
+        - Membership
+      security:
+        - bearerAuth: []
+        - cookieAuth: []
+          csrfToken: []
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  invite:
+                    type: object
+                    properties:
+                      id:
+                        type: string
+                      workspace_id:
+                        type: string
+                      email:
+                        type: string
+                      role:
+                        type: string
+                        enum:
+                          - owner
+                          - admin
+                          - editor
+                          - viewer
+                      status:
+                        type: string
+                        enum:
+                          - pending
+                          - accepted
+                          - revoked
+                      invited_by_user_id:
+                        type: string
+                        nullable: true
+                      created_at:
+                        type: string
+                        format: date-time
+                      updated_at:
+                        type: string
+                        format: date-time
+                      version:
+                        type: integer
+                    required:
+                      - id
+                      - workspace_id
+                      - email
+                      - role
+                      - status
+                      - invited_by_user_id
+                      - created_at
+                      - updated_at
+                      - version
+                    additionalProperties: false
+                required:
+                  - invite
+                additionalProperties: false
+        "401":
+          description: Unauthenticated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: Forbidden
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: Conflict / version_mismatch
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+      description: "**Access:** workspace owner/admin, or platform admin."
+      parameters:
+        - name: workspaceId
+          in: path
+          required: true
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 64
+        - name: inviteId
+          in: path
+          required: true
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 64
+      x-access: workspace owner/admin, or platform admin
+  /v1/me/devices:
+    get:
+      operationId: getV1MeDevices
+      summary: The caller's registered sync devices
+      tags:
+        - Auth
+      security:
+        - bearerAuth: []
+        - cookieAuth: []
+          csrfToken: []
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id:
+                          type: string
+                        device_name:
+                          type: string
+                        platform:
+                          type: string
+                        app_version:
+                          type: string
+                        created_at:
+                          type: string
+                          format: date-time
+                        last_seen_at:
+                          type: string
+                          format: date-time
+                      required:
+                        - id
+                        - device_name
+                        - platform
+                        - app_version
+                        - created_at
+                        - last_seen_at
+                      additionalProperties: false
+                  page:
+                    type: object
+                    properties:
+                      next_cursor:
+                        type: string
+                        nullable: true
+                      has_more:
+                        type: boolean
+                    required:
+                      - next_cursor
+                      - has_more
+                    additionalProperties: false
+                required:
+                  - items
+                  - page
+                additionalProperties: false
+        "400":
+          description: Invalid request (zod validation failed, malformed JSON, bad cursor)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: Unauthenticated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+      parameters:
+        - name: cursor
+          in: query
+          required: false
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 512
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+        - name: order
+          in: query
+          required: false
+          schema:
+            type: string
+            enum:
+              - asc
+              - desc
+            default: asc
+  /v1/me/devices/{deviceId}:
+    delete:
+      operationId: deleteV1MeDevicesDeviceId
+      summary: "Sign a device out: drops the refresh tokens of the sign-in it registered with and removes it"
+      tags:
+        - Auth
+      security:
+        - bearerAuth: []
+        - cookieAuth: []
+          csrfToken: []
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                    enum:
+                      - true
+                required:
+                  - ok
+                additionalProperties: false
+        "401":
+          description: Unauthenticated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+      description: The device can no longer refresh its access token (the current one expires within its lifetime, 1 h by default) and its `client_id` stops working for sync. The refresh tokens are deleted rather than marked revoked, so the signed-out device trying to refresh is a plain 401, not a reuse that would sign out every other device. Notes it changed keep their content. Audited (`device.signed_out`).
+      parameters:
+        - name: deviceId
+          in: path
+          required: true
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 64
+  /v1/workspaces/{workspaceId}/notes:
+    get:
+      operationId: getV1WorkspacesWorkspaceIdNotes
+      summary: List the live notes of a workspace (metadata only, no content)
+      tags:
+        - Notes
+      security:
+        - bearerAuth: []
+        - cookieAuth: []
+          csrfToken: []
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id:
+                          type: string
+                        workspace_id:
+                          type: string
+                        path:
+                          type: string
+                        version:
+                          type: integer
+                        size:
+                          type: integer
+                        created_at:
+                          type: string
+                          format: date-time
+                        updated_at:
+                          type: string
+                          format: date-time
+                        updated_by:
+                          type: object
+                          properties:
+                            id:
+                              type: string
+                            display_name:
+                              type: string
+                          required:
+                            - id
+                            - display_name
+                          additionalProperties: false
+                          nullable: true
+                      required:
+                        - id
+                        - workspace_id
+                        - path
+                        - version
+                        - size
+                        - created_at
+                        - updated_at
+                        - updated_by
+                      additionalProperties: false
+                  page:
+                    type: object
+                    properties:
+                      next_cursor:
+                        type: string
+                        nullable: true
+                      has_more:
+                        type: boolean
+                    required:
+                      - next_cursor
+                      - has_more
+                    additionalProperties: false
+                required:
+                  - items
+                  - page
+                additionalProperties: false
+        "400":
+          description: Invalid request (zod validation failed, malformed JSON, bad cursor)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: Unauthenticated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: Forbidden
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+      description: |-
+        `q` filters by a case-insensitive substring of the path. Deleted notes (tombstones) are not listed.
+
+        **Access:** any active workspace member, or platform admin.
+      parameters:
+        - name: workspaceId
+          in: path
+          required: true
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 64
+        - name: cursor
+          in: query
+          required: false
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 512
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+        - name: order
+          in: query
+          required: false
+          schema:
+            type: string
+            enum:
+              - asc
+              - desc
+            default: asc
+        - name: q
+          in: query
+          required: false
+          schema:
+            type: string
+            maxLength: 200
+      x-access: any active workspace member, or platform admin
+  /v1/workspaces/{workspaceId}/notes/{noteId}:
+    get:
+      operationId: getV1WorkspacesWorkspaceIdNotesNoteId
+      summary: One live note with its content
+      tags:
+        - Notes
+      security:
+        - bearerAuth: []
+        - cookieAuth: []
+          csrfToken: []
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  note:
+                    type: object
+                    properties:
+                      id:
+                        type: string
+                      workspace_id:
+                        type: string
+                      path:
+                        type: string
+                      version:
+                        type: integer
+                      size:
+                        type: integer
+                      created_at:
+                        type: string
+                        format: date-time
+                      updated_at:
+                        type: string
+                        format: date-time
+                      updated_by:
+                        type: object
+                        properties:
+                          id:
+                            type: string
+                          display_name:
+                            type: string
+                        required:
+                          - id
+                          - display_name
+                        additionalProperties: false
+                        nullable: true
+                      content:
+                        type: string
+                      content_hash:
+                        type: string
+                    required:
+                      - id
+                      - workspace_id
+                      - path
+                      - version
+                      - size
+                      - created_at
+                      - updated_at
+                      - updated_by
+                      - content
+                      - content_hash
+                    additionalProperties: false
+                required:
+                  - note
+                additionalProperties: false
+        "401":
+          description: Unauthenticated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: Forbidden
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+      description: |-
+        Looked up by `(workspace, note id)`: ids of other workspaces and deleted notes are `404 not_found`.
+
+        **Access:** any active workspace member, or platform admin.
+      parameters:
+        - name: workspaceId
+          in: path
+          required: true
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 64
+        - name: noteId
+          in: path
+          required: true
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 64
+      x-access: any active workspace member, or platform admin
+  /v1/sync/clients/register:
+    post:
+      operationId: postV1SyncClientsRegister
+      summary: Register a device for sync
+      tags:
+        - Sync
+      security:
+        - bearerAuth: []
+        - cookieAuth: []
+          csrfToken: []
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  client_id:
+                    type: string
+                  protocol_version:
+                    type: integer
+                  features:
+                    type: array
+                    items:
+                      type: string
+                required:
+                  - client_id
+                  - protocol_version
+                  - features
+                additionalProperties: false
+        "400":
+          description: Invalid request (zod validation failed, malformed JSON, bad cursor)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: Unauthenticated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "429":
+          description: Rate limited
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+      description: Creates the device (`client_id`, listed under GET /v1/me/devices) and answers the sync `protocol_version` and the optional `features` the server supports. A device registered with a desktop access token is linked to that sign-in, so signing the device out (DELETE /v1/me/devices/{id}) revokes its refresh tokens.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                device_name:
+                  type: string
+                  minLength: 1
+                  maxLength: 200
+                platform:
+                  type: string
+                  minLength: 1
+                  maxLength: 50
+                app_version:
+                  type: string
+                  minLength: 1
+                  maxLength: 50
+              required:
+                - device_name
+                - platform
+                - app_version
+              additionalProperties: false
+  /v1/workspaces/{workspaceId}/sync/push:
+    post:
+      operationId: postV1WorkspacesWorkspaceIdSyncPush
+      summary: Push note changes. Each change is accepted or rejected on its own.
+      tags:
+        - Sync
+      security:
+        - bearerAuth: []
+        - cookieAuth: []
+          csrfToken: []
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  accepted:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        op_id:
+                          type: string
+                        note_id:
+                          type: string
+                        version:
+                          type: integer
+                        seq:
+                          type: integer
+                      required:
+                        - op_id
+                        - note_id
+                        - version
+                        - seq
+                      additionalProperties: false
+                  rejected:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        op_id:
+                          type: string
+                        note_id:
+                          type: string
+                        reason:
+                          type: string
+                          enum:
+                            - version_mismatch
+                            - path_taken
+                            - not_found
+                            - too_large
+                            - invalid
+                            - forbidden
+                        message:
+                          type: string
+                        current:
+                          type: object
+                          properties:
+                            version:
+                              type: integer
+                            path:
+                              type: string
+                            deleted:
+                              type: boolean
+                            content:
+                              type: string
+                              nullable: true
+                          required:
+                            - version
+                            - path
+                            - deleted
+                            - content
+                          additionalProperties: false
+                          nullable: true
+                      required:
+                        - op_id
+                        - note_id
+                        - reason
+                        - message
+                        - current
+                      additionalProperties: false
+                  checkpoint:
+                    type: integer
+                required:
+                  - accepted
+                  - rejected
+                  - checkpoint
+                additionalProperties: false
+        "400":
+          description: Invalid request (zod validation failed, malformed JSON, bad cursor)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: Unauthenticated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: Forbidden
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "413":
+          description: Body too large
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "429":
+          description: Rate limited
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+      description: |-
+        At most 200 changes; the body limit of this route is larger than elsewhere (GOO_SYNC_BODY_LIMIT_BYTES, default 26 MiB, so one note always fits; clients batch by about 8 MiB of content). Changes apply in array order, each in its own transaction, and are idempotent by `op_id`: a replayed change returns its original answer and changes nothing. `base_version` is 0 for a new note and otherwise the version the client last saw. On upsert `path` and `content` are each optional (absent = unchanged); a new note needs both. Content is at most 4194304 UTF-8 bytes; `content_hash` (SHA-256) is computed by the server. Paths are relative, `/`-separated, case-insensitively unique among live notes and end in .md, .markdown, .mdown or .mkd. A delete leaves a tombstone; an upsert with the tombstone's version revives it. Rejection `reason`s: `version_mismatch` (with `current`), `path_taken` (with `current` when the note exists), `not_found`, `too_large`, `invalid`, `forbidden` (the caller is a viewer: every change is refused, nothing is written). The client branches on `reason`, never on the HTTP status. `checkpoint` is the workspace checkpoint after the push (do not advance the pull checkpoint with it).
+
+        **Access:** any active member (changes of viewers are rejected `forbidden`), or platform admin.
+      parameters:
+        - name: workspaceId
+          in: path
+          required: true
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 64
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                client_id:
+                  type: string
+                  minLength: 1
+                  maxLength: 64
+                changes:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      op_id:
+                        type: string
+                        minLength: 1
+                        maxLength: 64
+                      note_id:
+                        type: string
+                        minLength: 1
+                        maxLength: 64
+                      op:
+                        type: string
+                        enum:
+                          - upsert
+                          - delete
+                      base_version:
+                        type: integer
+                        minimum: 0
+                      path:
+                        type: string
+                      content:
+                        type: string
+                    required:
+                      - op_id
+                      - note_id
+                      - op
+                      - base_version
+                    additionalProperties: false
+                  maxItems: 200
+              required:
+                - client_id
+                - changes
+              additionalProperties: false
+      x-access: any active member (changes of viewers are rejected `forbidden`), or platform admin
+  /v1/workspaces/{workspaceId}/sync/pull:
+    get:
+      operationId: getV1WorkspacesWorkspaceIdSyncPull
+      summary: Pull the notes changed after a checkpoint (repeat with the returned checkpoint while has_more)
+      tags:
+        - Sync
+      security:
+        - bearerAuth: []
+        - cookieAuth: []
+          csrfToken: []
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  changes:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        note_id:
+                          type: string
+                        path:
+                          type: string
+                        version:
+                          type: integer
+                        deleted:
+                          type: boolean
+                        content_hash:
+                          type: string
+                          nullable: true
+                        content:
+                          type: string
+                          nullable: true
+                        seq:
+                          type: integer
+                      required:
+                        - note_id
+                        - path
+                        - version
+                        - deleted
+                        - content_hash
+                        - content
+                        - seq
+                      additionalProperties: false
+                  checkpoint:
+                    type: integer
+                  has_more:
+                    type: boolean
+                required:
+                  - changes
+                  - checkpoint
+                  - has_more
+                additionalProperties: false
+        "400":
+          description: Invalid request (zod validation failed, malformed JSON, bad cursor)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: Unauthenticated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: Forbidden
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "429":
+          description: Rate limited
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+      description: |-
+        Each changed note appears once with its latest state (edits made while a device was offline are coalesced), ordered by `seq`. `content` and `content_hash` are null for tombstones. `after=0` is the initial download and leaves tombstones out; later pages and pulls deliver them (ignore tombstones of unknown notes). A page holds at most `limit` changes and about 8 MiB of content (always at least one change). Store the returned `checkpoint` only after applying the page.
+
+        **Access:** any active workspace member, or platform admin.
+      parameters:
+        - name: workspaceId
+          in: path
+          required: true
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 64
+        - name: client_id
+          in: query
+          required: true
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 64
+        - name: after
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 0
+            default: 0
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 500
+            default: 200
+      x-access: any active workspace member, or platform admin
+  /v1/admin/users:
+    get:
+      operationId: getV1AdminUsers
+      summary: List platform users
+      tags:
+        - Admin
+      security:
+        - bearerAuth: []
+        - cookieAuth: []
+          csrfToken: []
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id:
+                          type: string
+                        email:
+                          type: string
+                        display_name:
+                          type: string
+                        platform_role:
+                          type: string
+                          enum:
+                            - super_admin
+                            - platform_admin
+                            - user
+                        must_change_password:
+                          type: boolean
+                        disabled:
+                          type: boolean
+                        created_at:
+                          type: string
+                          format: date-time
+                        updated_at:
+                          type: string
+                          format: date-time
+                      required:
+                        - id
+                        - email
+                        - display_name
+                        - platform_role
+                        - must_change_password
+                        - disabled
+                        - created_at
+                        - updated_at
+                      additionalProperties: false
+                  page:
+                    type: object
+                    properties:
+                      next_cursor:
+                        type: string
+                        nullable: true
+                      has_more:
+                        type: boolean
+                    required:
+                      - next_cursor
+                      - has_more
+                    additionalProperties: false
+                required:
+                  - items
+                  - page
+                additionalProperties: false
+        "400":
+          description: Invalid request (zod validation failed, malformed JSON, bad cursor)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: Unauthenticated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: Forbidden
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+      description: "**Access:** platform_admin or super_admin."
+      parameters:
+        - name: cursor
+          in: query
+          required: false
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 512
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+        - name: order
+          in: query
+          required: false
+          schema:
+            type: string
+            enum:
+              - asc
+              - desc
+            default: asc
+        - name: q
+          in: query
+          required: false
+          schema:
+            type: string
+            maxLength: 100
+        - name: platform_role
+          in: query
+          required: false
+          schema:
+            type: string
+            enum:
+              - super_admin
+              - platform_admin
+              - user
+      x-access: platform_admin or super_admin
+    post:
+      operationId: postV1AdminUsers
+      summary: Create/onboard a user. Creating a platform_admin requires super_admin.
+      tags:
+        - Admin
+      security:
+        - bearerAuth: []
+        - cookieAuth: []
+          csrfToken: []
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  user:
+                    type: object
+                    properties:
+                      id:
+                        type: string
+                      email:
+                        type: string
+                      display_name:
+                        type: string
+                      platform_role:
+                        type: string
+                        enum:
+                          - super_admin
+                          - platform_admin
+                          - user
+                      must_change_password:
+                        type: boolean
+                      disabled:
+                        type: boolean
+                      created_at:
+                        type: string
+                        format: date-time
+                      updated_at:
+                        type: string
+                        format: date-time
+                    required:
+                      - id
+                      - email
+                      - display_name
+                      - platform_role
+                      - must_change_password
+                      - disabled
+                      - created_at
+                      - updated_at
+                    additionalProperties: false
+                  temporary_password:
+                    type: string
+                    nullable: true
+                required:
+                  - user
+                  - temporary_password
+                additionalProperties: false
+        "400":
+          description: Invalid request (zod validation failed, malformed JSON, bad cursor)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: Unauthenticated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: Forbidden
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: Conflict / version_mismatch
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+      description: |-
+        If `password` is omitted a random temporary password is generated and returned ONCE in `temporary_password`; such accounts always get `must_change_password: true` (sending `must_change_password: false` with a generated password is a 400). With an explicit `password`, `must_change_password` defaults to false. `super_admin` cannot be created through the API (the single super admin comes from GOO_ADMIN_BOOTSTRAP).
+
+        **Access:** platform_admin or super_admin; platform_role=platform_admin needs super_admin only.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                email:
+                  type: string
+                  format: email
+                  maxLength: 254
+                display_name:
+                  type: string
+                  minLength: 1
+                  maxLength: 100
+                platform_role:
+                  type: string
+                  enum:
+                    - platform_admin
+                    - user
+                  default: user
+                password:
+                  type: string
+                  minLength: 12
+                  maxLength: 256
+                must_change_password:
+                  type: boolean
+              required:
+                - email
+                - display_name
+              additionalProperties: false
+      x-access: platform_admin or super_admin; platform_role=platform_admin needs super_admin only
+  /v1/admin/users/{userId}:
+    patch:
+      operationId: patchV1AdminUsersUserId
+      summary: Update a user's display name, platform role, disabled state or must-change-password flag
+      tags:
+        - Admin
+      security:
+        - bearerAuth: []
+        - cookieAuth: []
+          csrfToken: []
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  user:
+                    type: object
+                    properties:
+                      id:
+                        type: string
+                      email:
+                        type: string
+                      display_name:
+                        type: string
+                      platform_role:
+                        type: string
+                        enum:
+                          - super_admin
+                          - platform_admin
+                          - user
+                      must_change_password:
+                        type: boolean
+                      disabled:
+                        type: boolean
+                      created_at:
+                        type: string
+                        format: date-time
+                      updated_at:
+                        type: string
+                        format: date-time
+                    required:
+                      - id
+                      - email
+                      - display_name
+                      - platform_role
+                      - must_change_password
+                      - disabled
+                      - created_at
+                      - updated_at
+                    additionalProperties: false
+                required:
+                  - user
+                additionalProperties: false
+        "400":
+          description: Invalid request (zod validation failed, malformed JSON, bad cursor)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: Unauthenticated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: Forbidden
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+      description: |-
+        Changing `platform_role`, or modifying/disabling any platform admin, requires super_admin. The super admin's role cannot change and nobody can disable themselves. Disabling revokes all sessions, refresh tokens and access tokens. `must_change_password: true` makes every route except GET /v1/me, POST /v1/me/password and logout answer `403 password_change_required` for that user (existing sessions included) until they change their password; `false` lifts the requirement.
+
+        **Access:** platform_admin or super_admin for regular users; super_admin only for roles and for other admins.
+      parameters:
+        - name: userId
+          in: path
+          required: true
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 64
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                display_name:
+                  type: string
+                  minLength: 1
+                  maxLength: 100
+                platform_role:
+                  type: string
+                  enum:
+                    - platform_admin
+                    - user
+                disabled:
+                  type: boolean
+                must_change_password:
+                  type: boolean
+              additionalProperties: false
+      x-access: platform_admin or super_admin for regular users; super_admin only for roles and for other admins
+  /v1/admin/users/{userId}/reset-password:
+    post:
+      operationId: postV1AdminUsersUserIdResetPassword
+      summary: Reset a user's password to a new temporary one (returned once) that must be changed at next sign-in
+      tags:
+        - Admin
+      security:
+        - bearerAuth: []
+        - cookieAuth: []
+          csrfToken: []
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  user:
+                    type: object
+                    properties:
+                      id:
+                        type: string
+                      email:
+                        type: string
+                      display_name:
+                        type: string
+                      platform_role:
+                        type: string
+                        enum:
+                          - super_admin
+                          - platform_admin
+                          - user
+                      must_change_password:
+                        type: boolean
+                      disabled:
+                        type: boolean
+                      created_at:
+                        type: string
+                        format: date-time
+                      updated_at:
+                        type: string
+                        format: date-time
+                    required:
+                      - id
+                      - email
+                      - display_name
+                      - platform_role
+                      - must_change_password
+                      - disabled
+                      - created_at
+                      - updated_at
+                    additionalProperties: false
+                  temporary_password:
+                    type: string
+                required:
+                  - user
+                  - temporary_password
+                additionalProperties: false
+        "400":
+          description: Invalid request (zod validation failed, malformed JSON, bad cursor)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: Unauthenticated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: Forbidden
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+      description: |-
+        Generates a random temporary password (returned ONCE in `temporary_password`), sets `must_change_password`, and signs the user out everywhere (dashboard sessions, refresh tokens and access tokens). Same authorization as PATCH: platform admins may reset regular users, only the super admin may reset another platform admin; nobody resets their own password here (use POST /v1/me/password), so the super admin's password cannot be reset through the API.
+
+        **Access:** platform_admin or super_admin for regular users; super_admin only for other admins; never yourself.
+      parameters:
+        - name: userId
+          in: path
+          required: true
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 64
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties: {}
+              additionalProperties: false
+      x-access: platform_admin or super_admin for regular users; super_admin only for other admins; never yourself
+  /v1/admin/workspaces:
+    get:
+      operationId: getV1AdminWorkspaces
+      summary: List all workspaces on the platform
+      tags:
+        - Admin
+      security:
+        - bearerAuth: []
+        - cookieAuth: []
+          csrfToken: []
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id:
+                          type: string
+                        slug:
+                          type: string
+                        name:
+                          type: string
+                        description:
+                          type: string
+                        owner_user_id:
+                          type: string
+                        created_at:
+                          type: string
+                          format: date-time
+                        updated_at:
+                          type: string
+                          format: date-time
+                        version:
+                          type: integer
+                        member_count:
+                          type: integer
+                      required:
+                        - id
+                        - slug
+                        - name
+                        - description
+                        - owner_user_id
+                        - created_at
+                        - updated_at
+                        - version
+                        - member_count
+                      additionalProperties: false
+                  page:
+                    type: object
+                    properties:
+                      next_cursor:
+                        type: string
+                        nullable: true
+                      has_more:
+                        type: boolean
+                    required:
+                      - next_cursor
+                      - has_more
+                    additionalProperties: false
+                required:
+                  - items
+                  - page
+                additionalProperties: false
+        "400":
+          description: Invalid request (zod validation failed, malformed JSON, bad cursor)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: Unauthenticated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: Forbidden
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+      description: "**Access:** platform_admin or super_admin."
+      parameters:
+        - name: cursor
+          in: query
+          required: false
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 512
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+        - name: order
+          in: query
+          required: false
+          schema:
+            type: string
+            enum:
+              - asc
+              - desc
+            default: asc
+        - name: q
+          in: query
+          required: false
+          schema:
+            type: string
+            maxLength: 100
+      x-access: platform_admin or super_admin
+  /v1/admin/workspaces/{workspaceId}:
+    get:
+      operationId: getV1AdminWorkspacesWorkspaceId
+      summary: "Workspace inspection: metadata, owner, member and note counts"
+      tags:
+        - Admin
+      security:
+        - bearerAuth: []
+        - cookieAuth: []
+          csrfToken: []
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  workspace:
+                    type: object
+                    properties:
+                      id:
+                        type: string
+                      slug:
+                        type: string
+                      name:
+                        type: string
+                      description:
+                        type: string
+                      owner_user_id:
+                        type: string
+                      created_at:
+                        type: string
+                        format: date-time
+                      updated_at:
+                        type: string
+                        format: date-time
+                      version:
+                        type: integer
+                    required:
+                      - id
+                      - slug
+                      - name
+                      - description
+                      - owner_user_id
+                      - created_at
+                      - updated_at
+                      - version
+                    additionalProperties: false
+                  owner:
+                    type: object
+                    properties:
+                      id:
+                        type: string
+                      email:
+                        type: string
+                      display_name:
+                        type: string
+                    required:
+                      - id
+                      - email
+                      - display_name
+                    additionalProperties: false
+                  counts:
+                    type: object
+                    properties:
+                      members:
+                        type: integer
+                      pending_invites:
+                        type: integer
+                      notes:
+                        type: integer
+                      note_bytes:
+                        type: integer
+                      checkpoint:
+                        type: integer
+                    required:
+                      - members
+                      - pending_invites
+                      - notes
+                      - note_bytes
+                      - checkpoint
+                    additionalProperties: false
+                required:
+                  - workspace
+                  - owner
+                  - counts
+                additionalProperties: false
+        "401":
+          description: Unauthenticated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: Forbidden
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+      description: "**Access:** platform_admin or super_admin."
+      parameters:
+        - name: workspaceId
+          in: path
+          required: true
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 64
+      x-access: platform_admin or super_admin
+    delete:
+      operationId: deleteV1AdminWorkspacesWorkspaceId
+      summary: Delete any workspace (platform level)
+      tags:
+        - Admin
+      security:
+        - bearerAuth: []
+        - cookieAuth: []
+          csrfToken: []
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                    enum:
+                      - true
+                required:
+                  - ok
+                additionalProperties: false
+        "401":
+          description: Unauthenticated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: Forbidden
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+      description: "**Access:** super_admin only."
+      parameters:
+        - name: workspaceId
+          in: path
+          required: true
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 64
+      x-access: super_admin only
+  /v1/admin/audit-logs:
+    get:
+      operationId: getV1AdminAuditLogs
+      summary: Platform-wide audit trail (append-only). Ordered by (created_at, id); pass order=desc for newest first.
+      tags:
+        - Admin
+      security:
+        - bearerAuth: []
+        - cookieAuth: []
+          csrfToken: []
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id:
+                          type: string
+                        actor_user_id:
+                          type: string
+                          nullable: true
+                        actor_email:
+                          type: string
+                          nullable: true
+                        action:
+                          type: string
+                        resource_type:
+                          type: string
+                        resource_id:
+                          type: string
+                        workspace_id:
+                          type: string
+                          nullable: true
+                        request_id:
+                          type: string
+                          nullable: true
+                        details:
+                          type: object
+                          additionalProperties: {}
+                        created_at:
+                          type: string
+                          format: date-time
+                      required:
+                        - id
+                        - actor_user_id
+                        - actor_email
+                        - action
+                        - resource_type
+                        - resource_id
+                        - workspace_id
+                        - request_id
+                        - details
+                        - created_at
+                      additionalProperties: false
+                  page:
+                    type: object
+                    properties:
+                      next_cursor:
+                        type: string
+                        nullable: true
+                      has_more:
+                        type: boolean
+                    required:
+                      - next_cursor
+                      - has_more
+                    additionalProperties: false
+                required:
+                  - items
+                  - page
+                additionalProperties: false
+        "400":
+          description: Invalid request (zod validation failed, malformed JSON, bad cursor)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: Unauthenticated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: Forbidden
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+      description: "**Access:** platform_admin or super_admin."
+      parameters:
+        - name: cursor
+          in: query
+          required: false
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 512
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+        - name: order
+          in: query
+          required: false
+          schema:
+            type: string
+            enum:
+              - asc
+              - desc
+            default: asc
+        - name: action
+          in: query
+          required: false
+          schema:
+            type: string
+            maxLength: 100
+        - name: actor_user_id
+          in: query
+          required: false
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 64
+        - name: workspace_id
+          in: query
+          required: false
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 64
+      x-access: platform_admin or super_admin
+  /v1/workspaces/{workspaceId}/audit-logs:
+    get:
+      operationId: getV1WorkspacesWorkspaceIdAuditLogs
+      summary: Workspace audit trail. Ordered by (created_at, id); pass order=desc for newest first.
+      tags:
+        - Admin
+      security:
+        - bearerAuth: []
+        - cookieAuth: []
+          csrfToken: []
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id:
+                          type: string
+                        actor_user_id:
+                          type: string
+                          nullable: true
+                        actor_email:
+                          type: string
+                          nullable: true
+                        action:
+                          type: string
+                        resource_type:
+                          type: string
+                        resource_id:
+                          type: string
+                        workspace_id:
+                          type: string
+                          nullable: true
+                        request_id:
+                          type: string
+                          nullable: true
+                        details:
+                          type: object
+                          additionalProperties: {}
+                        created_at:
+                          type: string
+                          format: date-time
+                      required:
+                        - id
+                        - actor_user_id
+                        - actor_email
+                        - action
+                        - resource_type
+                        - resource_id
+                        - workspace_id
+                        - request_id
+                        - details
+                        - created_at
+                      additionalProperties: false
+                  page:
+                    type: object
+                    properties:
+                      next_cursor:
+                        type: string
+                        nullable: true
+                      has_more:
+                        type: boolean
+                    required:
+                      - next_cursor
+                      - has_more
+                    additionalProperties: false
+                required:
+                  - items
+                  - page
+                additionalProperties: false
+        "400":
+          description: Invalid request (zod validation failed, malformed JSON, bad cursor)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: Unauthenticated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: Forbidden
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+      description: "**Access:** workspace owner/admin, or platform admin."
+      parameters:
+        - name: workspaceId
+          in: path
+          required: true
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 64
+        - name: cursor
+          in: query
+          required: false
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 512
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+        - name: order
+          in: query
+          required: false
+          schema:
+            type: string
+            enum:
+              - asc
+              - desc
+            default: asc
+        - name: action
+          in: query
+          required: false
+          schema:
+            type: string
+            maxLength: 100
+        - name: actor_user_id
+          in: query
+          required: false
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 64
+      x-access: workspace owner/admin, or platform admin
+  /v1/admin/health:
+    get:
+      operationId: getV1AdminHealth
+      summary: "Operational health: pings PostgreSQL (503 when the database is unreachable)"
+      tags:
+        - Admin
+      security:
+        - bearerAuth: []
+        - cookieAuth: []
+          csrfToken: []
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum:
+                      - ok
+                      - degraded
+                  services:
+                    type: object
+                    properties:
+                      api:
+                        type: string
+                        enum:
+                          - ok
+                      postgres:
+                        type: string
+                        enum:
+                          - ok
+                          - down
+                    required:
+                      - api
+                      - postgres
+                    additionalProperties: false
+                  timestamp:
+                    type: string
+                    format: date-time
+                required:
+                  - status
+                  - services
+                  - timestamp
+                additionalProperties: false
+        "401":
+          description: Unauthenticated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: Forbidden
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "503":
+          description: Service unavailable
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum:
+                      - ok
+                      - degraded
+                  services:
+                    type: object
+                    properties:
+                      api:
+                        type: string
+                        enum:
+                          - ok
+                      postgres:
+                        type: string
+                        enum:
+                          - ok
+                          - down
+                    required:
+                      - api
+                      - postgres
+                    additionalProperties: false
+                  timestamp:
+                    type: string
+                    format: date-time
+                required:
+                  - status
+                  - services
+                  - timestamp
+                additionalProperties: false
+      description: "**Access:** platform_admin or super_admin."
+      x-access: platform_admin or super_admin
+  /v1/admin/stats:
+    get:
+      operationId: getV1AdminStats
+      summary: Platform counters for the dashboard
+      tags:
+        - Admin
+      security:
+        - bearerAuth: []
+        - cookieAuth: []
+          csrfToken: []
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  users:
+                    type: integer
+                  platform_admins:
+                    type: integer
+                  disabled_users:
+                    type: integer
+                  workspaces:
+                    type: integer
+                  memberships:
+                    type: integer
+                  pending_invites:
+                    type: integer
+                  notes:
+                    type: integer
+                  devices:
+                    type: integer
+                  active_sessions:
+                    type: integer
+                  audit_logs:
+                    type: integer
+                required:
+                  - users
+                  - platform_admins
+                  - disabled_users
+                  - workspaces
+                  - memberships
+                  - pending_invites
+                  - notes
+                  - devices
+                  - active_sessions
+                  - audit_logs
+                additionalProperties: false
+        "401":
+          description: Unauthenticated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: Forbidden
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+      description: "**Access:** platform_admin or super_admin."
+      x-access: platform_admin or super_admin
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+    cookieAuth:
+      type: apiKey
+      in: cookie
+      name: goo_session
+    csrfToken:
+      type: apiKey
+      in: header
+      name: X-CSRF-Token
+      description: Required with cookieAuth on POST/PUT/PATCH/DELETE.
+  schemas:
+    ErrorResponse:
+      type: object
+      properties:
+        error:
+          type: object
+          properties:
+            code:
+              type: string
+              enum:
+                - invalid_request
+                - unauthenticated
+                - forbidden
+                - not_found
+                - conflict
+                - rate_limited
+                - workspace_access_denied
+                - version_mismatch
+                - csrf_invalid
+                - origin_not_allowed
+                - password_change_required
+                - internal_error
+            message:
+              type: string
+            details:
+              type: object
+              additionalProperties: {}
+            request_id:
+              type: string
+          required:
+            - code
+            - message
+            - details
+            - request_id
+          additionalProperties: false
+      required:
+        - error
+      additionalProperties: false
